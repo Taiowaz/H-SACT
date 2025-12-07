@@ -105,7 +105,7 @@ def main(args):
         if args.num_gpus > 1:
             model = torch.nn.DataParallel(model)
         model = model.to(args.device)
-        logging.info(f"模型结构: {model}")
+        # logging.info(f"模型结构: {model}")
         model.train()
         model = link_pred_train(
             model.to(args.device), args, g, df, node_feats, edge_feats
@@ -128,33 +128,33 @@ def main(args):
         dataset.load_val_ns()
         args.output_dir = output_dir + f"/run_{run_idx}"
         os.makedirs(args.output_dir, exist_ok=True)
-        # Validation ...
-        (
-            perf_mrr_val_mean,
-            perf_mrr_val_std,
-            perf_list_val,
-            auroc_val,
-            auprc_val,
-        ) = test(
-            "val",
-            model.to(args.device),
-            args,
-            metric,
-            neg_sampler,
-            g,
-            df,
-            node_feats,
-            edge_feats,
-        )
-        end_val = timeit.default_timer()
+        # # Validation ...
+        # (
+        #     perf_mrr_val_mean,
+        #     perf_mrr_val_std,
+        #     perf_list_val,
+        #     auroc_val,
+        #     auprc_val,
+        # ) = test(
+        #     "val",
+        #     model.to(args.device),
+        #     args,
+        #     metric,
+        #     neg_sampler,
+        #     g,
+        #     df,
+        #     node_feats,
+        #     edge_feats,
+        # )
+        # end_val = timeit.default_timer()
 
-        logging.info(f"val: Evaluation Setting: >>> ONE-VS-MANY <<< ")
-        logging.info(
-            f"\tval: {metric}: {perf_mrr_val_mean: .4f} ± {perf_mrr_val_std: .4f}"
-        )
-        logging.info(f"\tval: AUROC: {auroc_val: .4f} | AUPRC: {auprc_val: .4f}")
-        val_time = timeit.default_timer() - start_val
-        logging.info(f"\tval: Elapsed Time (s): {val_time: .4f}")
+        # logging.info(f"val: Evaluation Setting: >>> ONE-VS-MANY <<< ")
+        # logging.info(
+        #     f"\tval: {metric}: {perf_mrr_val_mean: .4f} ± {perf_mrr_val_std: .4f}"
+        # )
+        # logging.info(f"\tval: AUROC: {auroc_val: .4f} | AUPRC: {auprc_val: .4f}")
+        # val_time = timeit.default_timer() - start_val
+        # logging.info(f"\tval: Elapsed Time (s): {val_time: .4f}")
 
         dataset.load_test_ns()
         # testing ...
@@ -192,14 +192,14 @@ def main(args):
                 "data": args.dataset,
                 "run": run_idx,
                 "seed": args.seed,
-                f"val {metric}": f"{perf_mrr_val_mean: .4f}  +- {perf_mrr_val_std: .4f}",
-                "val auroc": f"{auroc_val: .4f}",
-                "val auprc": f"{auprc_val: .4f}",
+                # f"val {metric}": f"{perf_mrr_val_mean: .4f}  +- {perf_mrr_val_std: .4f}",
+                # "val auroc": f"{auroc_val: .4f}",
+                # "val auprc": f"{auprc_val: .4f}",
                 f"test {metric}": f"{perf_mrr_test_mean: .4f} +- {perf_mrr_test_std: .4f}",
                 "test auroc": f"{auroc_test: .4f}",
                 "test auprc": f"{auprc_test: .4f}",
                 "test_time": test_time,
-                "tot_train_val_time": val_time,
+                # "tot_train_val_time": val_time,
             },
             result_filename,
         )
@@ -216,7 +216,11 @@ def main(args):
     )
     logging.info("==============================================================")
 
-
+    if torch.cuda.is_available():
+        max_mem = torch.cuda.max_memory_allocated(args.device) / (1024 * 1024)
+        logging.info(f"🔥 Peak GPU Memory Usage: {max_mem:.2f} MB")
+    
+    logging.info("==============================================================")
 if __name__ == "__main__":
     args = get_args()
     main(args)

@@ -44,9 +44,9 @@ def evaluate_mrr(pred, neg_samples):
     evaluator = Evaluator(name="thgl-software")
 
     metric_values = []
+    if type(pred) == torch.Tensor:
+        pred = pred.detach().cpu().numpy()
     for y_pred_pos, y_pred_neg in zip(y_pred_pos_list, y_pred_neg_list):
-        y_pred_pos = np.array(y_pred_pos.detach().cpu().numpy())
-        y_pred_neg = np.array(y_pred_neg.detach().cpu().numpy())
         input_dict = {
             "y_pred_pos": y_pred_pos,
             "y_pred_neg": y_pred_neg,

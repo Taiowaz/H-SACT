@@ -91,6 +91,10 @@ def get_args(args=None):
         help="Dropout rate used within the Riemannian encoder.",
     )
 
+
+    parser.add_argument("--use_euclidean", type=int, default=1, help="1 to enable, 0 to disable")
+    parser.add_argument("--use_hyperbolic", type=int, default=1, help="1 to enable, 0 to disable")
+    parser.add_argument("--use_spherical", type=int, default=1, help="1 to enable, 0 to disable")
     args = parser.parse_args(args)
 
     return args

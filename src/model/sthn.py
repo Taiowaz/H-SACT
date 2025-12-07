@@ -1059,6 +1059,7 @@ class HeteroPatch_Encoding(nn.Module):
         # 将编码后的边时间特征累加到对应索引位置
         x[inds] = x[inds] + edge_time_feats
         
+        
         # 调整张量形状，将其分割为多个窗口
         x = x.view(
             -1, self.per_graph_size // self.window_size, self.window_size * x.shape[-1]
@@ -1140,7 +1141,7 @@ class HeteroEdgePredictor_per_node(torch.nn.Module):
         h_src = h[:num_edge]
         h_pos_dst = h[num_edge : 2 * num_edge]
         h_neg_dst = h[2 * num_edge :]
-        
+        h_save = h[:2 * num_edge]
         if edge_types is None or len(self.edge_types) == 1:
             # 🆕 NEW: 向后兼容模式 - 如果没有类型信息或只有一种类型，使用默认预测器
             if len(self.edge_types) == 1:
@@ -1153,7 +1154,7 @@ class HeteroEdgePredictor_per_node(torch.nn.Module):
                 h_pos_edge = torch.nn.functional.relu(h_src_enc + h_pos_dst_enc)
                 h_neg_edge = torch.nn.functional.relu(h_src_enc.tile(neg_samples, 1) + h_neg_dst_enc)
                 
-                return predictor['out_fc'](h_pos_edge), predictor['out_fc'](h_neg_edge)
+                return predictor['out_fc'](h_pos_edge), predictor['out_fc'](h_neg_edge),h_save
             else:
                 # 使用默认预测器（完全兼容原来的逻辑）
                 h_src_enc = self.default_src_fc(h_src)
@@ -1163,11 +1164,12 @@ class HeteroEdgePredictor_per_node(torch.nn.Module):
                 h_pos_edge = torch.nn.functional.relu(h_src_enc + h_pos_dst_enc)
                 h_neg_edge = torch.nn.functional.relu(h_src_enc.tile(neg_samples, 1) + h_neg_dst_enc)
                 
-                return self.default_out_fc(h_pos_edge), self.default_out_fc(h_neg_edge)
+                return self.default_out_fc(h_pos_edge), self.default_out_fc(h_neg_edge),h_save
         
         else:
             # 🆕 NEW: 异构模式 - 根据边类型分别预测（原来没有这个逻辑）
-            return self._hetero_forward(h_src, h_pos_dst, h_neg_dst, edge_types, neg_samples)
+            pred_pos, pred_neg = self._hetero_forward(h_src, h_pos_dst, h_neg_dst, edge_types, neg_samples)
+            return pred_pos,pred_neg,h_save
     
     def _hetero_forward(self, h_src, h_pos_dst, h_neg_dst, edge_types, neg_samples):
         """
@@ -1523,7 +1525,7 @@ class HeteroSTHN_Interface_rgfm(nn.Module):
         edge_feats = model_inputs[0]
         edge_types = torch.argmax(edge_feats, dim=1) if edge_feats.ndim == 2 and edge_feats.shape[1] > 1 else None
 
-        pred_pos, pred_neg = self.predict(model_inputs, neg_samples, node_feats, edge_types, structural_data)
+        pred_pos, pred_neg,h_save = self.predict(model_inputs, neg_samples, node_feats, edge_types, structural_data)
         
         # 损失计算逻辑完全不变
         all_pred_logits = torch.cat((pred_pos, pred_neg), dim=0)
@@ -1535,7 +1537,7 @@ class HeteroSTHN_Interface_rgfm(nn.Module):
         # 返回 sigmoid 激活后的概率值
         all_pred_prob = torch.sigmoid(all_pred_logits)
         
-        return loss, all_pred_prob, all_edge_label
+        return loss, all_pred_prob, all_edge_label,h_save
 
     def predict(self, model_inputs, neg_samples, node_feats, edge_types=None,
                 # 🆕 NEW: predict函数也接收 structural_data
@@ -1571,8 +1573,10 @@ class HeteroSTHN_Interface_rgfm(nn.Module):
             raise ValueError("No features were generated. Check your model's feature dimension settings.")
 
         # --- 步骤4: 使用最终特征进行预测 ---
-        pred_pos, pred_neg = self.edge_predictor(final_x, neg_samples=neg_samples, edge_types=edge_types)
-        return pred_pos, pred_neg
+        pred_pos, pred_neg, _ = self.edge_predictor(final_x, neg_samples=neg_samples, edge_types=edge_types)
+        num_edge = aligned_z_struct.shape[0] // (neg_samples + 2)
+        h_save = aligned_z_struct[:2 * num_edge]
+        return pred_pos, pred_neg,h_save
     
 
 

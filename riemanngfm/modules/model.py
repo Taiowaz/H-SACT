@@ -159,7 +159,7 @@ class StructuralBlock(nn.Module):
         if hasattr(data, 'batch_star') and data.batch_star is not None:
             # 如果是 github 或 software 数据集，它们会有 batch_star
             # 我们优先使用针对性的 Star_learner
-            print("INFO: 检测到星型图结构，使用 StarStructureLearner。")
+            # print("INFO: 检测到星型图结构，使用 StarStructureLearner。")
             x_H = self.Star_learner(x_H, x_S, data.batch_star)
         else:
             # 对于其他数据集，使用默认的通用 Hyp_learner
