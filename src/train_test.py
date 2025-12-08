@@ -172,7 +172,7 @@ def run(
     pbar = tqdm(total=len(train_loader))
     pbar.set_description("%s mode with negative samples %d ..." % (mode, neg_samples))
 
-    get_root_nodes(subgraphs, args, mode)
+    # get_root_nodes(subgraphs, args, mode)
 
     ###################################################
     # compute + training + fetch all scores
@@ -221,8 +221,8 @@ def run(
             loss_lst.append(float(loss))
 
         pbar.update(1)
-    
-    np.savez(f"aux-exp/RQ5/data/{args.dataset}_{mode}_hs.npz",hs=np.array(hs))
+    hs=np.array(hs)
+    np.savez(f"{args.exper_name}/{args.dataset}/output/{args.dataset}_{mode}_hs.npz",hs=hs)
     pbar.close()
     total_auroc = MLAUROC.compute()
     total_auprc = MLAUPRC.compute()
@@ -443,7 +443,7 @@ def test(split_mode, model, args, metric, neg_sampler, g, df, node_feats, edge_f
         negative_sampler=neg_sampler,
         split_mode=split_mode,
     )
-    get_root_nodes(test_subgraphs, args, "test")
+    # get_root_nodes(test_subgraphs, args, "test")
 
     # Get current dataframe based on split mode
     if split_mode == "test":
@@ -540,7 +540,7 @@ def test(split_mode, model, args, metric, neg_sampler, g, df, node_feats, edge_f
             if ind % 100 == 0:
                 logging.info(f"Processed {ind} batches...")
         hs = np.array(hs)
-        np.savez(f"aux-exp/RQ5/data/{args.dataset}_test_hs.npz",hs=hs)
+        np.savez(f"{args.exper_name}/{args.dataset}/output/{args.dataset}_test_hs.npz",hs=hs)
     pbar.close()
     logging.info(f"Completed prediction for {split_mode} set.")
 
@@ -593,7 +593,7 @@ def get_root_nodes(subgraphs, args,split_mode):
         nodes.append([nodes_src_batch, nodes_dst_batch])
     nodes = np.array(nodes)
     np.savez(
-        os.path.join("aux-exp/RQ5/data", f'{args.dataset}_{split_mode}_nodes.npz'),
+        os.path.join(f"{args.exper_name}/{args.dataset}/output", f'{args.dataset}_{split_mode}_nodes.npz'),
         nodes=nodes
     )
 

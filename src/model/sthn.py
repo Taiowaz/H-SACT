@@ -1461,47 +1461,61 @@ class RiemannianStructuralEncoder(nn.Module):
                 module.reset_parameters()
 class HeteroSTHN_Interface_rgfm(nn.Module):
     """
-    集成了黎曼结构编码器的异构STHN接口。
-    该版本期望 structural_data 对象在外部被构建好后传入。
+    修改版：集成了黎曼结构编码器 + 对称对齐损失。
+    不考虑 node_feats，专注于 x_temporal 和 aligned_z_struct 的结合与对齐。
     """
     def __init__(self, mlp_mixer_configs: dict, edge_predictor_configs: dict, edge_types: list = None,
-                 riemannian_configs: dict = None):
+                 riemannian_configs: dict = None, alpha: float = 0.2):
         super(HeteroSTHN_Interface_rgfm, self).__init__()
 
         self.time_feats_dim = edge_predictor_configs["dim_in_time"]
-        self.node_feats_dim = edge_predictor_configs["dim_in_node"]
+        self.node_feats_dim = edge_predictor_configs["dim_in_node"] # 仅用于预测器维度参考
         self.edge_types = edge_types or ['0']
+        self.alpha = alpha
 
-        # 初始化原有的时序特征提取器
+        # --- 1. 初始化原有的时序特征提取器 ---
         if self.time_feats_dim > 0:
             mlp_mixer_configs['edge_types'] = self.edge_types
             self.base_model = HeteroPatch_Encoding(**mlp_mixer_configs)
 
-        # 初始化原有的边预测器
+        # --- 2. 初始化原有的边预测器 ---
         edge_predictor_configs['edge_types'] = self.edge_types
         self.edge_predictor = HeteroEdgePredictor_per_node(**edge_predictor_configs)
         
-        # 损失函数保持不变
+        # 损失函数
         self.criterion = nn.BCEWithLogitsLoss(reduction="mean")
         
-        # 🆕 NEW: 初始化黎曼结构编码器和融合层
+        # --- 3. 对齐损失模块 (Symmetric Alignment Loss) ---
+        self.align_loss_fn = SymmetricAlignmentLoss()
+        
+        # 对齐维度 (Project to this dim for alignment)
+        align_dim = mlp_mixer_configs.get('out_channels', 128)
+        
+        # Z_t (Temporal) 投影层
+        t_dim = mlp_mixer_configs.get('out_channels', 0)
+        self.proj_t = nn.Linear(t_dim, align_dim) if t_dim != align_dim else nn.Identity()
+        
+        # --- 4. 初始化黎曼结构编码器和融合层 ---
         self.use_riemannian = riemannian_configs is not None
         if self.use_riemannian:
             self.riemannian_encoder = RiemannianStructuralEncoder(**riemannian_configs)
             
-            # 定义一个融合层，将时序特征和结构特征结合起来
-            temporal_dim = mlp_mixer_configs.get('out_channels', 0)
-            if self.node_feats_dim > 0:
-                temporal_dim += self.node_feats_dim
-
+            # 结构特征维度
             structural_dim = 3 * riemannian_configs.get('embed_dim', 0)
-            # 🆕 添加动态对齐层
             self.dynamic_alignment = DynamicAlignmentLayer(structural_dim)
             
-            predictor_input_dim = edge_predictor_configs["dim_in_time"] + edge_predictor_configs["dim_in_node"]
+            # Z_s (Structural) 投影层 🆕 修改点：用于将结构特征投影到对齐维度
+            self.proj_s = nn.Linear(structural_dim, align_dim)
+
+            # 融合层输入维度 🆕 修改点：只包含 temporal + structural，不再包含 node_feats
+            fusion_input_dim = t_dim + structural_dim
             
+            # 预测器输入维度 (保持与edge_predictor定义一致，以便兼容)
+            predictor_input_dim = self.time_feats_dim + self.node_feats_dim
+            
+            # 融合层：将 (Time + Struct) -> Predictor Input Dim
             self.fusion_layer = nn.Sequential(
-                nn.Linear(temporal_dim + structural_dim, predictor_input_dim * 2),
+                nn.Linear(fusion_input_dim, predictor_input_dim * 2),
                 nn.ReLU(),
                 nn.Linear(predictor_input_dim * 2, predictor_input_dim)
             )
@@ -1512,73 +1526,150 @@ class HeteroSTHN_Interface_rgfm(nn.Module):
         if self.time_feats_dim > 0:
             self.base_model.reset_parameters()
         self.edge_predictor.reset_parameters()
+        
+        if hasattr(self, 'proj_t') and isinstance(self.proj_t, nn.Linear):
+            self.proj_t.reset_parameters()
+        # 🆕 重置结构投影层
+        if hasattr(self, 'proj_s') and isinstance(self.proj_s, nn.Linear):
+            self.proj_s.reset_parameters()
+            
         if self.use_riemannian:
             self.riemannian_encoder.reset_parameters()
             for layer in self.fusion_layer:
                 if isinstance(layer, nn.Linear):
                     layer.reset_parameters()
 
-    def forward(self, model_inputs, neg_samples, node_feats,
-                # 🆕 NEW: forward函数新增 structural_data 参数
-                structural_data: Data = None):
+    def forward(self, model_inputs, neg_samples, node_feats, structural_data: Data = None):
         
         edge_feats = model_inputs[0]
         edge_types = torch.argmax(edge_feats, dim=1) if edge_feats.ndim == 2 and edge_feats.shape[1] > 1 else None
 
-        pred_pos, pred_neg,h_save = self.predict(model_inputs, neg_samples, node_feats, edge_types, structural_data)
+        # 获取预测结果和中间特征
+        # z_t: 时序特征, z_s: 结构特征 (替代了原来的 z_x)
+        pred_pos, pred_neg, h_save, z_t, z_s = self.predict(
+            model_inputs, neg_samples, node_feats, edge_types, structural_data
+        )
         
-        # 损失计算逻辑完全不变
+        # 1. 计算主损失 (Task Loss)
         all_pred_logits = torch.cat((pred_pos, pred_neg), dim=0)
         all_edge_label = torch.cat(
             (torch.ones_like(pred_pos), torch.zeros_like(pred_neg)), dim=0
         )
-        loss = self.criterion(all_pred_logits, all_edge_label).mean()
+        loss_main = self.criterion(all_pred_logits, all_edge_label).mean()
         
-        # 返回 sigmoid 激活后的概率值
+        # 2. 计算对齐损失 (Alignment Loss: Temporal vs. Structural)
+        loss_align = torch.tensor(0.0, device=loss_main.device)
+        if z_t is not None and z_s is not None:
+            # 投影到相同维度
+            z_t_proj = self.proj_t(z_t)
+            z_s_proj = self.proj_s(z_s) # 🆕 投影结构特征
+            # 计算 JSD (时序 和 结构 之间的一致性)
+            loss_align = self.align_loss_fn(z_t_proj, z_s_proj)
+        
+        # 3. 总损失
+        total_loss = loss_main + self.alpha * loss_align
+
         all_pred_prob = torch.sigmoid(all_pred_logits)
         
-        return loss, all_pred_prob, all_edge_label,h_save
+        return total_loss, all_pred_prob, all_edge_label, h_save
 
-    def predict(self, model_inputs, neg_samples, node_feats, edge_types=None,
-                # 🆕 NEW: predict函数也接收 structural_data
-                structural_data: Data = None):
+    def predict(self, model_inputs, neg_samples, node_feats, edge_types=None, structural_data: Data = None):
         
         model_inputs_for_base = model_inputs[:4]
         
-        # --- 步骤1: 提取原有的时序/特征嵌入 ---
+        # --- 步骤1: 提取时间特征 (Z_t) ---
         x_temporal = None
         if self.time_feats_dim > 0:
-            # base_model的输出对应于批次中的 "root_nodes"
             x_temporal = self.base_model(*model_inputs_for_base, edge_types)
         
-        if node_feats is not None and self.node_feats_dim > 0:
-            x_temporal = torch.cat([x_temporal, node_feats], dim=1) if x_temporal is not None else node_feats
+        # 🆕 Z_t 用于对齐，同时也是融合的输入之一
+        z_t = x_temporal
+        
+
+        z_s = None # 初始化结构特征变量
+        final_x = None
 
         # --- 步骤2 & 3: 提取、对齐并融合黎曼结构嵌入 ---
         if self.use_riemannian and structural_data is not None:
             if x_temporal is None:
                 raise ValueError("Temporal features must be computed to be fused with structural features.")
 
-            z_struct = self.riemannian_encoder(structural_data)
-            # aligned_z_struct = z_struct[structural_data.root_nodes_mask]
-             # 🆕 使用动态对齐层
+            # 1. 提取黎曼结构特征
+            raw_z_struct = self.riemannian_encoder(structural_data)
+            
+            # 2. 动态长度对齐 (将结构特征的长度对齐到 batch_size)
             target_batch_size = x_temporal.shape[0]
-            aligned_z_struct = self.dynamic_alignment(z_struct, target_batch_size)
-            final_x = torch.cat([x_temporal, aligned_z_struct], dim=1)
-            final_x = self.fusion_layer(final_x)
+            aligned_z_struct = self.dynamic_alignment(raw_z_struct, target_batch_size)
+            
+            # 🆕 保存结构特征用于 Loss 计算
+            z_s = aligned_z_struct
+            
+            # 3. 融合 (Time + Structure)
+            # 🆕 修改点：只拼接 Temporal 和 Structural
+            fusion_input = torch.cat([x_temporal, aligned_z_struct], dim=1)
+            final_x = self.fusion_layer(fusion_input)
         else:
+            # 如果没有启用黎曼模块，回退到仅使用时序特征
             final_x = x_temporal
 
         if final_x is None:
-            raise ValueError("No features were generated. Check your model's feature dimension settings.")
+            raise ValueError("No features were generated.")
 
-        # --- 步骤4: 使用最终特征进行预测 ---
+        # --- 步骤4: 预测 ---
         pred_pos, pred_neg, _ = self.edge_predictor(final_x, neg_samples=neg_samples, edge_types=edge_types)
-        num_edge = aligned_z_struct.shape[0] // (neg_samples + 2)
-        h_save = aligned_z_struct[:2 * num_edge]
-        return pred_pos, pred_neg,h_save
+        
+        num_edge = pred_pos.shape[0]
+        h_save = final_x[:num_edge] if final_x is not None else None
+        
+        return pred_pos, pred_neg, h_save, z_t, z_s
     
 
+class SymmetricAlignmentLoss(nn.Module):
+    """
+    论文公式 (5) 和 (6) 的实现：基于 Jensen-Shannon Divergence (实际为对称 KL) 的对齐损失。
+    
+    Loss = Sigmoid( Sum( KL(Z_t || Z_x) + KL(Z_x || Z_t) ) )
+    """
+    def __init__(self):
+        super(SymmetricAlignmentLoss, self).__init__()
+
+    def forward(self, z_t, z_x):
+        """
+        Args:
+            z_t: 时间模态特征 [batch_size, hidden_dim]
+            z_x: 文本/节点模态特征 [batch_size, hidden_dim]
+        """
+        # 1. 转换为概率分布 (Softmax)，确保元素为正且和为1
+        # 使用 log_softmax 为了数值稳定性，因为 KLDivLoss 接收 log_prob
+        p_t = F.softmax(z_t, dim=-1)
+        p_x = F.softmax(z_x, dim=-1)
+        
+        log_p_t = F.log_softmax(z_t, dim=-1)
+        log_p_x = F.log_softmax(z_x, dim=-1)
+
+        # 2. 计算 KL 散度
+        # F.kl_div(input, target) 计算 KL(target || input) 或 KL(input || target) 取决于公式
+        # PyTorch KLDivLoss 的公式是: target * (log(target) - input)
+        # 对应数学公式 sum p(x) * log(p(x)/q(x))
+        # 这里 input 应该是 log-probabilities, target 应该是 probabilities
+        
+        # JSD term 1: Sum( z_t * log(z_t / z_x) ) = KL(z_t || z_x)
+        kl_t_x = F.kl_div(log_p_x, p_t, reduction='none').sum(dim=-1)
+        
+        # JSD term 2: Sum( z_x * log(z_x / z_t) ) = KL(z_x || z_t)
+        kl_x_t = F.kl_div(log_p_t, p_x, reduction='none').sum(dim=-1)
+
+        # 3. 对称求和 (JSD)
+        # jsd_val: [batch_size]
+        jsd_val = kl_t_x + kl_x_t
+
+        # 4. Batch 求和 (公式 5 中的 sum_{i=1}^{|V_B|})
+        total_jsd = jsd_val.sum()
+
+        # 5. Sigmoid 激活 (公式 5)
+        loss_align = torch.sigmoid(total_jsd)
+
+        return loss_align
 
 class DynamicAlignmentLayer(nn.Module):
     """动态对齐层，将任意长度的结构特征对齐到目标长度"""
