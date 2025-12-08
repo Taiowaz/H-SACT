@@ -9,9 +9,13 @@ from torch_sparse import SparseTensor
 from torchmetrics.classification import MulticlassAUROC, MulticlassAveragePrecision
 from torchmetrics.classification import BinaryAUROC, BinaryAveragePrecision
 from sklearn.preprocessing import MinMaxScaler
-from src.utils.utils import evaluate_mrr
-from tgb.linkproppred.evaluate import Evaluator
+from src.utils.utils import evaluate_mrr, row_norm
 from scipy.sparse.linalg import ArpackError
+import networkx as nx
+from torch_geometric.data import Data, Batch
+from torch_geometric.utils import to_networkx, get_laplacian
+from scipy.sparse import csr_matrix
+from scipy.sparse.linalg import eigs
 
 from src.utils.construct_subgraph import (
     get_random_inds,
@@ -20,7 +24,6 @@ from src.utils.construct_subgraph import (
     get_subgraph_sampler,
     pre_compute_subgraphs,
 )
-from src.utils.utils import row_norm
 
 
 def get_inputs_for_ind(
@@ -144,8 +147,6 @@ def run(
     mode,
 ):
     time_epoch = 0
-    ###################################################
-    # setup modes
     cur_inds = 0
     if mode == "train":
         model.train()
@@ -160,7 +161,6 @@ def run(
         cached_neg_samples = 1
 
     elif mode == "test":
-        ## Erfan: remove this part use TGB evaluation
         raise ("Use TGB evaluation")
         # model.eval()
         # cur_df = df[args.test_mask]
@@ -179,7 +179,7 @@ def run(
     loss_lst = []
     MLAUROC.reset()
     MLAUPRC.reset()
-    
+
     hs = []
     for ind in range(len(train_loader)):
         ###################################################
@@ -221,8 +221,8 @@ def run(
             loss_lst.append(float(loss))
 
         pbar.update(1)
-    
-    np.savez(f"aux-exp/RQ5/data/{args.dataset}_{mode}_hs.npz",hs=np.array(hs))
+
+    np.savez(f"{args.output_dir}/{args.dataset}_{mode}_hs.npz", hs=np.array(hs))
     pbar.close()
     total_auroc = MLAUROC.compute()
     total_auprc = MLAUPRC.compute()
@@ -476,11 +476,10 @@ def test(split_mode, model, args, metric, neg_sampler, g, df, node_feats, edge_f
     else:
         auc_metric = BinaryAUROC(thresholds=None)
         ap_metric = BinaryAveragePrecision(thresholds=None)
-    
-    
+
     auc_metric.reset()
     ap_metric.reset()
-    
+
     logging.info(f"Starting prediction for {split_mode} set...")
     all_aucs = []
     all_aps = []
@@ -504,7 +503,7 @@ def test(split_mode, model, args, metric, neg_sampler, g, df, node_feats, edge_f
 
             # Forward pass
             if args.use_riemannian_structure:
-                loss, pred, edge_label,h_batch = model(
+                loss, pred, edge_label, h_batch = model(
                     inputs, neg_samples, subgraph_node_feats, structual_data
                 )
             else:
@@ -514,15 +513,15 @@ def test(split_mode, model, args, metric, neg_sampler, g, df, node_feats, edge_f
             # mrr指标计算
             perf_list.append(evaluate_mrr(pred, neg_samples))
             pbar.update(1)
-            
+
             # 计算AUC和AP
             num_src = len(edge_label) // (neg_samples + 1)
             for i in range(num_src):
                 pred_batch_item = []
                 label_batch_item = []
                 for j in range(neg_samples + 1):
-                    pred_batch_item.append(pred[i + j* num_src])
-                    label_batch_item.append(edge_label[i + j* num_src])
+                    pred_batch_item.append(pred[i + j * num_src])
+                    label_batch_item.append(edge_label[i + j * num_src])
                 pred_batch_item = torch.stack(pred_batch_item)
                 label_batch_item = torch.stack(label_batch_item)
                 auc = auc_metric(pred_batch_item, label_batch_item.long())
@@ -540,7 +539,7 @@ def test(split_mode, model, args, metric, neg_sampler, g, df, node_feats, edge_f
             if ind % 100 == 0:
                 logging.info(f"Processed {ind} batches...")
         hs = np.array(hs)
-        np.savez(f"aux-exp/RQ5/data/{args.dataset}_test_hs.npz",hs=hs)
+        np.savez(f"{args.output_dir}/{args.dataset}_test_hs.npz", hs=hs)
     pbar.close()
     logging.info(f"Completed prediction for {split_mode} set.")
 
@@ -553,59 +552,42 @@ def test(split_mode, model, args, metric, neg_sampler, g, df, node_feats, edge_f
     # auc and ap
     auc = float(np.mean(all_aucs))
     auc_std = float(np.std(all_aucs))
-    logging.info(
-        f"{split_mode} results - auc: {auc:.4f} ± {auc_std:.4f}"
-    )
-    
+    logging.info(f"{split_mode} results - auc: {auc:.4f} ± {auc_std:.4f}")
+
     ap = float(np.mean(all_aps))
     ap_std = float(np.std(all_aps))
-    logging.info(
-        f"{split_mode} results - ap: {ap:.4f} ± {ap_std:.4f}"
-    )
+    logging.info(f"{split_mode} results - ap: {ap:.4f} ± {ap_std:.4f}")
 
     all_preds = torch.stack(all_preds).cpu()
     all_labels = torch.stack(all_labels).cpu()
-    save_path = os.path.join(args.output_dir, f'{args.dataset}_{split_mode}_preds.npz')
-    np.savez(
-        save_path,
-        preds=all_preds.numpy(),
-        labels=all_labels.numpy()
-    )
+    save_path = os.path.join(args.output_dir, f"{args.dataset}_{split_mode}_preds.npz")
+    np.savez(save_path, preds=all_preds.numpy(), labels=all_labels.numpy())
 
-    logging.info(f"Saved predictions and labels to {save_path}")   
-    
+    logging.info(f"Saved predictions and labels to {save_path}")
+
     # Clear memory
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
     return (perf_metrics_mean, perf_metrics_std, perf_list, auc, ap)
 
-def get_root_nodes(subgraphs, args,split_mode):
+
+def get_root_nodes(subgraphs, args, split_mode):
     subgraph_data = subgraphs[0]
     nodes = []
     for subgra in subgraph_data:
         nodes_dst_batch = []
         nodes_src_batch = []
-        for sub in subgra[:args.batch_size]:
+        for sub in subgra[: args.batch_size]:
             nodes_src_batch.append(sub["root_node"])
-        for sub in subgra[args.batch_size:2*args.batch_size]:
+        for sub in subgra[args.batch_size : 2 * args.batch_size]:
             nodes_dst_batch.append(sub["root_node"])
         nodes.append([nodes_src_batch, nodes_dst_batch])
     nodes = np.array(nodes)
     np.savez(
-        os.path.join("aux-exp/RQ5/data", f'{args.dataset}_{split_mode}_nodes.npz'),
-        nodes=nodes
+        os.path.join(args.output_dir, f"{args.dataset}_{split_mode}_nodes.npz"),
+        nodes=nodes,
     )
-
-import torch
-import networkx as nx
-import numpy as np
-from torch_geometric.data import Data, Batch
-from torch_geometric.utils import to_networkx, from_networkx, get_laplacian
-from scipy.sparse import csr_matrix
-from scipy.sparse.linalg import eigs
-
-# 在您的 train_test.py 文件中
 
 
 def get_eigen_tokens_tensor(edge_index, num_nodes, embed_dim, device):
@@ -1110,6 +1092,3 @@ def create_riemannian_data_snapshot(
     snapshot_data.n_id = torch.arange(snapshot_data.num_nodes, device=device)
 
     return snapshot_data.to(device)
-
-
-
