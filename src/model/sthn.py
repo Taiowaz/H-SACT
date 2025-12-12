@@ -743,10 +743,10 @@ class STHN_Interface(nn.Module):
             (torch.ones_like(pred_pos), torch.zeros_like(pred_neg)), dim=0
         )
         loss = self.criterion(all_pred_logits, all_edge_label).mean()
-        
+
         # 返回 sigmoid 激活后的概率值
         all_pred_prob = torch.sigmoid(all_pred_logits)
-        
+
         return loss, all_pred_prob, all_edge_label
 
     def predict(self, model_inputs, neg_samples, node_feats):
@@ -794,7 +794,7 @@ class Multiclass_Interface(nn.Module):
             (torch.ones_like(pred_pos), torch.zeros_like(pred_neg)), dim=0
         )
         loss = self.criterion(all_pred_logits, all_edge_label).mean()
-        
+
         # 返回 sigmoid 激活后的概率值
         all_pred_prob = torch.sigmoid(all_pred_logits)
 
@@ -815,21 +815,18 @@ class Multiclass_Interface(nn.Module):
         return pred_pos, pred_neg
 
 
-
-
-
-
 class HeteroTimeEncode(nn.Module):
     """
     异构时间编码器 - 为不同类型的边提供专门的时间编码
     基于原有TimeEncode扩展，保持接口兼容性
     """
+
     def __init__(self, edge_types: list, time_dim: int = 100):
         super(HeteroTimeEncode, self).__init__()
         self.edge_types = edge_types
         self.time_dim = time_dim
         self.num_edge_types = len(edge_types)
-        
+
         # 为每种边类型创建专门的时间编码器
         self.type_encoders = nn.ModuleDict()
         for i, edge_type in enumerate(edge_types):
@@ -839,35 +836,36 @@ class HeteroTimeEncode(nn.Module):
             freq_multiplier = 1.0 + i * 0.1  # 每种类型有10%的频率偏移
             encoder.w.weight.data *= freq_multiplier
             self.type_encoders[str(edge_type)] = encoder
-        
+
         # 默认编码器（用于兼容性）
         self.default_encoder = TimeEncode(time_dim)
-        
+
     def forward(self, edge_ts: torch.Tensor, edge_types: torch.Tensor = None):
         """
         前向传播
-        
+
         Args:
             edge_ts: [num_edges] 时间戳张量
             edge_types: [num_edges] 边类型索引张量，可选
                        如果为None，则所有边使用默认编码器
-        
+
         Returns:
             torch.Tensor: [num_edges, time_dim] 时间特征嵌入
         """
         if edge_types is None:
             # 如果没有类型信息，使用默认编码器（向后兼容）
             return self.default_encoder(edge_ts)
-        
+
         # 初始化输出张量
         batch_size = edge_ts.shape[0]
-        time_embeddings = torch.zeros(batch_size, self.time_dim, 
-                                    device=edge_ts.device, dtype=edge_ts.dtype)
-        
+        time_embeddings = torch.zeros(
+            batch_size, self.time_dim, device=edge_ts.device, dtype=edge_ts.dtype
+        )
+
         # 为每种边类型分别编码
         for i, edge_type in enumerate(self.edge_types):
             # 找到当前类型的边
-            type_mask = (edge_types == i)
+            type_mask = edge_types == i
             if type_mask.any():
                 # 获取当前类型的时间戳
                 type_times = edge_ts[type_mask]
@@ -876,9 +874,9 @@ class HeteroTimeEncode(nn.Module):
                 type_embeddings = type_encoder(type_times)
                 # 存储到对应位置
                 time_embeddings[type_mask] = type_embeddings
-        
+
         return time_embeddings
-    
+
     def reset_parameters(self):
         """重置所有编码器的参数"""
         for encoder in self.type_encoders.values():
@@ -892,29 +890,32 @@ class HeteroFeatEncode(nn.Module):
     基于原有FeatEncode扩展，保持接口兼容性
     Return [raw_edge_feat | HeteroTimeEncode(edge_time_stamp)] + type_embedding
     """
+
     def __init__(self, edge_types: list, time_dims: int, feat_dims: int, out_dims: int):
         super(HeteroFeatEncode, self).__init__()
         self.edge_types = edge_types
         self.time_dims = time_dims
         self.feat_dims = feat_dims
         self.out_dims = out_dims
-        
+
         # 🆕 NEW: 使用异构时间编码器替代原有的单一时间编码器
         self.time_encoder = HeteroTimeEncode(edge_types, time_dims)
-        
+
         # 🆕 NEW: 为每种边类型创建专门的特征编码器（原来只有一个）
         self.feat_encoders = nn.ModuleDict()
         for edge_type in edge_types:
-            self.feat_encoders[str(edge_type)] = nn.Linear(time_dims + feat_dims, out_dims)
-        
+            self.feat_encoders[str(edge_type)] = nn.Linear(
+                time_dims + feat_dims, out_dims
+            )
+
         # 🆕 NEW: 添加类型嵌入层（原来没有）
         self.edge_type_embedding = nn.Embedding(len(edge_types), out_dims)
-        
+
         # 🆕 NEW: 默认特征编码器（用于向后兼容，原来的FeatEncode逻辑）
         self.default_feat_encoder = nn.Linear(time_dims + feat_dims, out_dims)
-        
+
         self.reset_parameters()
-    
+
     def reset_parameters(self):
         self.time_encoder.reset_parameters()
         # 🆕 NEW: 重置所有类型专门的编码器
@@ -924,45 +925,56 @@ class HeteroFeatEncode(nn.Module):
         self.edge_type_embedding.reset_parameters()
         # 保持兼容性
         self.default_feat_encoder.reset_parameters()
-    
-    def forward(self, edge_feats: torch.Tensor, edge_ts: torch.Tensor, edge_types: torch.Tensor = None):
+
+    def forward(
+        self,
+        edge_feats: torch.Tensor,
+        edge_ts: torch.Tensor,
+        edge_types: torch.Tensor = None,
+    ):
         """
         前向传播 - 保持与原有FeatEncode相同的接口
-        
+
         Args:
             edge_feats: [num_edges, feat_dim] 边特征
             edge_ts: [num_edges] 时间戳
             edge_types: [num_edges] 边类型索引（🆕 NEW: 新增参数）
-        
+
         Returns:
             torch.Tensor: [num_edges, out_dims] 编码后的特征
         """
         # 🆕 NEW: 使用异构时间编码器（原来用普通TimeEncode）
         edge_time_feats = self.time_encoder(edge_ts, edge_types)
-        
+
         # 拼接边特征和时间特征（与原来相同）
         combined_feats = torch.cat([edge_feats, edge_time_feats], dim=1)
-        
+
         if edge_types is None:
             # 🆕 NEW: 向后兼容模式 - 如果没有类型信息，使用默认编码器
             return self.default_feat_encoder(combined_feats)
-        
+
         # 🆕 NEW: 异构模式 - 根据边类型分别编码（原来没有这个逻辑）
-        output_feats = torch.zeros(len(edge_feats), self.out_dims, device=edge_feats.device)
-        
+        output_feats = torch.zeros(
+            len(edge_feats), self.out_dims, device=edge_feats.device
+        )
+
         for i, edge_type in enumerate(self.edge_types):
-            type_mask = (edge_types == i)
+            type_mask = edge_types == i
             if type_mask.any():
                 # 使用对应类型的特征编码器
                 type_feats = combined_feats[type_mask]
                 type_output = self.feat_encoders[str(edge_type)](type_feats)
-                
+
                 # 🆕 NEW: 添加类型嵌入（原来没有）
-                type_emb = self.edge_type_embedding(torch.tensor(i, device=edge_feats.device))
-                type_output = type_output + type_emb.unsqueeze(0).expand(type_output.size(0), -1)
-                
+                type_emb = self.edge_type_embedding(
+                    torch.tensor(i, device=edge_feats.device)
+                )
+                type_output = type_output + type_emb.unsqueeze(0).expand(
+                    type_output.size(0), -1
+                )
+
                 output_feats[type_mask] = type_output
-        
+
         return output_feats
 
 
@@ -972,6 +984,7 @@ class HeteroPatch_Encoding(nn.Module):
     Input : [ batch_size, graph_size, edge_dims+time_dims]
     Output: [ batch_size, graph_size, output_dims]
     """
+
     def __init__(
         self,
         per_graph_size,
@@ -991,17 +1004,17 @@ class HeteroPatch_Encoding(nn.Module):
         self.per_graph_size = per_graph_size
         self.dropout = nn.Dropout(dropout)
         self.num_layers = num_layers
-        self.edge_types = edge_types or ['0']  # 🆕 NEW: 默认单一类型（保持兼容性）
-        
+        self.edge_types = edge_types or ["0"]  # 🆕 NEW: 默认单一类型（保持兼容性）
+
         # 🆕 NEW: 使用异构特征编码器替代原有的FeatEncode
         self.feat_encoder = HeteroFeatEncode(
             self.edge_types, time_channels, input_channels, hidden_channels
         )
-        
+
         # 以下部分与原有Patch_Encoding完全相同
         self.layernorm = nn.LayerNorm(hidden_channels)
         self.mlp_head = nn.Linear(hidden_channels, out_channels)
-        
+
         # inner layers - 保持原有的TransformerBlock结构
         self.mixer_blocks = torch.nn.ModuleList()
         for _ in range(num_layers):
@@ -1014,15 +1027,15 @@ class HeteroPatch_Encoding(nn.Module):
                     use_single_layer=use_single_layer,
                 )
             )
-        
+
         # padding - 与原有逻辑完全相同
         self.stride = window_size
         self.window_size = window_size
         self.pad_projector = nn.Linear(window_size * hidden_channels, hidden_channels)
         self.p_enc_1d_model_sum = Summer(PositionalEncoding1D(hidden_channels))
-        
+
         self.reset_parameters()
-    
+
     def reset_parameters(self):
         for layer in self.mixer_blocks:
             layer.reset_parameters()
@@ -1030,8 +1043,10 @@ class HeteroPatch_Encoding(nn.Module):
         self.layernorm.reset_parameters()
         self.mlp_head.reset_parameters()
         self.pad_projector.reset_parameters()  # 🆕 NEW: 添加了这个重置（原来可能遗漏了）
-    
-    def forward(self, edge_feats, edge_ts, batch_size, inds, edge_types=None):  # 🆕 NEW: 新增edge_types参数
+
+    def forward(
+        self, edge_feats, edge_ts, batch_size, inds, edge_types=None
+    ):  # 🆕 NEW: 新增edge_types参数
         """
         前向传播方法，处理输入的边特征和时间戳，生成最终的特征表示。
         保持与原有Patch_Encoding完全相同的接口
@@ -1048,7 +1063,7 @@ class HeteroPatch_Encoding(nn.Module):
         """
         # 🆕 NEW: 使用异构特征编码器（原来用普通FeatEncode）
         edge_time_feats = self.feat_encoder(edge_feats, edge_ts, edge_types)
-        
+
         # 以下处理流程与原有Patch_Encoding完全一致
         # 初始化一个全零张量，用于存储处理后的特征
         # 每per_graph_size为一个子图
@@ -1058,8 +1073,7 @@ class HeteroPatch_Encoding(nn.Module):
         )
         # 将编码后的边时间特征累加到对应索引位置
         x[inds] = x[inds] + edge_time_feats
-        
-        
+
         # 调整张量形状，将其分割为多个窗口
         x = x.view(
             -1, self.per_graph_size // self.window_size, self.window_size * x.shape[-1]
@@ -1068,12 +1082,12 @@ class HeteroPatch_Encoding(nn.Module):
         x = self.pad_projector(x)
         # 添加一维位置编码
         x = self.p_enc_1d_model_sum(x)
-        
+
         # 遍历所有的混合块，对特征进行处理
         for i in range(self.num_layers):
             # 对通道和特征维度应用混合块
             x = self.mixer_blocks[i](x)
-        
+
         # 使用层归一化处理特征
         x = self.layernorm(x)
         # 对特征在维度1上求均值
@@ -1090,28 +1104,33 @@ class HeteroEdgePredictor_per_node(torch.nn.Module):
     out = linear(src_node_feats) + linear(dst_node_feats)
     out = ReLU(out)
     """
-    def __init__(self, dim_in_time, dim_in_node, predict_class, edge_types: list = None):
+
+    def __init__(
+        self, dim_in_time, dim_in_node, predict_class, edge_types: list = None
+    ):
         super().__init__()
-        
+
         self.dim_in_time = dim_in_time
         self.dim_in_node = dim_in_node
         self.predict_class = predict_class
-        self.edge_types = edge_types or ['0']  # 🆕 NEW: 默认单一类型（保持兼容性）
-        
+        self.edge_types = edge_types or ["0"]  # 🆕 NEW: 默认单一类型（保持兼容性）
+
         # 🆕 NEW: 为每种边类型创建专门的预测器（原来只有一组）
         self.predictors = nn.ModuleDict()
         for edge_type in self.edge_types:
-            self.predictors[str(edge_type)] = nn.ModuleDict({
-                'src_fc': torch.nn.Linear(dim_in_time + dim_in_node, 100),
-                'dst_fc': torch.nn.Linear(dim_in_time + dim_in_node, 100),
-                'out_fc': torch.nn.Linear(100, predict_class)
-            })
-        
+            self.predictors[str(edge_type)] = nn.ModuleDict(
+                {
+                    "src_fc": torch.nn.Linear(dim_in_time + dim_in_node, 100),
+                    "dst_fc": torch.nn.Linear(dim_in_time + dim_in_node, 100),
+                    "out_fc": torch.nn.Linear(100, predict_class),
+                }
+            )
+
         # 🆕 NEW: 默认预测器（用于向后兼容，原来的EdgePredictor_per_node逻辑）
         self.default_src_fc = torch.nn.Linear(dim_in_time + dim_in_node, 100)
         self.default_dst_fc = torch.nn.Linear(dim_in_time + dim_in_node, 100)
         self.default_out_fc = torch.nn.Linear(100, predict_class)
-        
+
         self.reset_parameters()
 
     def reset_parameters(self):
@@ -1119,7 +1138,7 @@ class HeteroEdgePredictor_per_node(torch.nn.Module):
         for predictor_dict in self.predictors.values():
             for layer in predictor_dict.values():
                 layer.reset_parameters()
-        
+
         # 保持兼容性
         self.default_src_fc.reset_parameters()
         self.default_dst_fc.reset_parameters()
@@ -1128,12 +1147,12 @@ class HeteroEdgePredictor_per_node(torch.nn.Module):
     def forward(self, h, neg_samples=1, edge_types=None):  # 🆕 NEW: 新增edge_types参数
         """
         前向传播 - 保持与原有EdgePredictor_per_node相同的接口
-        
+
         Args:
             h: [batch_size, feature_dim] 节点特征
             neg_samples: 负采样数量
             edge_types: [num_edges] 边类型索引（🆕 NEW: 新增参数）
-        
+
         Returns:
             tuple: (正边预测结果, 负边预测结果)
         """
@@ -1141,98 +1160,120 @@ class HeteroEdgePredictor_per_node(torch.nn.Module):
         h_src = h[:num_edge]
         h_pos_dst = h[num_edge : 2 * num_edge]
         h_neg_dst = h[2 * num_edge :]
-        h_save = h[:2 * num_edge]
+        h_save = h[: 2 * num_edge]
         if edge_types is None or len(self.edge_types) == 1:
             # 🆕 NEW: 向后兼容模式 - 如果没有类型信息或只有一种类型，使用默认预测器
             if len(self.edge_types) == 1:
                 # 使用第一个（也是唯一的）类型预测器
                 predictor = self.predictors[self.edge_types[0]]
-                h_src_enc = predictor['src_fc'](h_src)
-                h_pos_dst_enc = predictor['dst_fc'](h_pos_dst)
-                h_neg_dst_enc = predictor['dst_fc'](h_neg_dst)
-                
+                h_src_enc = predictor["src_fc"](h_src)
+                h_pos_dst_enc = predictor["dst_fc"](h_pos_dst)
+                h_neg_dst_enc = predictor["dst_fc"](h_neg_dst)
+
                 h_pos_edge = torch.nn.functional.relu(h_src_enc + h_pos_dst_enc)
-                h_neg_edge = torch.nn.functional.relu(h_src_enc.tile(neg_samples, 1) + h_neg_dst_enc)
-                
-                return predictor['out_fc'](h_pos_edge), predictor['out_fc'](h_neg_edge),h_save
+                h_neg_edge = torch.nn.functional.relu(
+                    h_src_enc.tile(neg_samples, 1) + h_neg_dst_enc
+                )
+
+                return (
+                    predictor["out_fc"](h_pos_edge),
+                    predictor["out_fc"](h_neg_edge),
+                    h_save,
+                )
             else:
                 # 使用默认预测器（完全兼容原来的逻辑）
                 h_src_enc = self.default_src_fc(h_src)
                 h_pos_dst_enc = self.default_dst_fc(h_pos_dst)
                 h_neg_dst_enc = self.default_dst_fc(h_neg_dst)
-                
+
                 h_pos_edge = torch.nn.functional.relu(h_src_enc + h_pos_dst_enc)
-                h_neg_edge = torch.nn.functional.relu(h_src_enc.tile(neg_samples, 1) + h_neg_dst_enc)
-                
-                return self.default_out_fc(h_pos_edge), self.default_out_fc(h_neg_edge),h_save
-        
+                h_neg_edge = torch.nn.functional.relu(
+                    h_src_enc.tile(neg_samples, 1) + h_neg_dst_enc
+                )
+
+                return (
+                    self.default_out_fc(h_pos_edge),
+                    self.default_out_fc(h_neg_edge),
+                    h_save,
+                )
+
         else:
             # 🆕 NEW: 异构模式 - 根据边类型分别预测（原来没有这个逻辑）
-            pred_pos, pred_neg = self._hetero_forward(h_src, h_pos_dst, h_neg_dst, edge_types, neg_samples)
-            return pred_pos,pred_neg,h_save
-    
+            pred_pos, pred_neg = self._hetero_forward(
+                h_src, h_pos_dst, h_neg_dst, edge_types, neg_samples
+            )
+            return pred_pos, pred_neg, h_save
+
     def _hetero_forward(self, h_src, h_pos_dst, h_neg_dst, edge_types, neg_samples):
         """
         🆕 NEW: 异构边预测的具体实现
         """
         num_edge = h_src.shape[0]
-        
-        if len(edge_types)<num_edge:
+
+        if len(edge_types) < num_edge:
             # 随机填充一个self.edge_types的值
-            rand_fill = np.random.randint(0, len(self.edge_types), num_edge - len(edge_types))
-            edge_types = torch.cat([edge_types, torch.tensor(rand_fill, device=edge_types.device)], dim=0)
-            
+            rand_fill = np.random.randint(
+                0, len(self.edge_types), num_edge - len(edge_types)
+            )
+            edge_types = torch.cat(
+                [edge_types, torch.tensor(rand_fill, device=edge_types.device)], dim=0
+            )
+
         # 初始化输出张量
         pos_preds = []
         neg_preds = []
-        
+
         # 为每种边类型分别预测
         for i, edge_type in enumerate(self.edge_types):
-            type_mask = (edge_types[:num_edge] == i)
+            type_mask = edge_types[:num_edge] == i
 
             if type_mask.any():
                 predictor = self.predictors[str(edge_type)]
-                
+
                 # 获取当前类型的节点特征
                 type_h_src = h_src[type_mask]
                 type_h_pos_dst = h_pos_dst[type_mask]
-                
+
                 # 编码源节点和正目标节点
-                type_h_src_enc = predictor['src_fc'](type_h_src)
-                type_h_pos_dst_enc = predictor['dst_fc'](type_h_pos_dst)
-                
+                type_h_src_enc = predictor["src_fc"](type_h_src)
+                type_h_pos_dst_enc = predictor["dst_fc"](type_h_pos_dst)
+
                 # 处理负样本：为每个正样本生成neg_samples个负样本
                 type_neg_indices = []
                 for pos_idx in torch.where(type_mask)[0]:
                     neg_start = pos_idx * neg_samples
                     neg_end = (pos_idx + 1) * neg_samples
                     type_neg_indices.extend(range(neg_start, neg_end))
-                
+
                 if type_neg_indices:
                     type_h_neg_dst = h_neg_dst[type_neg_indices]
-                    type_h_neg_dst_enc = predictor['dst_fc'](type_h_neg_dst)
-                    
+                    type_h_neg_dst_enc = predictor["dst_fc"](type_h_neg_dst)
+
                     # 计算边表示
-                    type_h_pos_edge = torch.nn.functional.relu(type_h_src_enc + type_h_pos_dst_enc)
-                    type_h_neg_edge = torch.nn.functional.relu(
-                        type_h_src_enc.repeat_interleave(neg_samples, dim=0) + type_h_neg_dst_enc
+                    type_h_pos_edge = torch.nn.functional.relu(
+                        type_h_src_enc + type_h_pos_dst_enc
                     )
-                    
+                    type_h_neg_edge = torch.nn.functional.relu(
+                        type_h_src_enc.repeat_interleave(neg_samples, dim=0)
+                        + type_h_neg_dst_enc
+                    )
+
                     # 预测
-                    type_pos_pred = predictor['out_fc'](type_h_pos_edge)
-                    type_neg_pred = predictor['out_fc'](type_h_neg_edge)
-                    
+                    type_pos_pred = predictor["out_fc"](type_h_pos_edge)
+                    type_neg_pred = predictor["out_fc"](type_h_neg_edge)
+
                     pos_preds.append(type_pos_pred)
                     neg_preds.append(type_neg_pred)
-        
+
         # 拼接所有类型的预测结果
         if pos_preds:
             return torch.cat(pos_preds, dim=0), torch.cat(neg_preds, dim=0)
         else:
             # 如果没有任何类型的边，返回空张量
             device = h_src.device
-            return torch.empty(0, self.predict_class, device=device), torch.empty(0, self.predict_class, device=device)
-        
+            return torch.empty(0, self.predict_class, device=device), torch.empty(
+                0, self.predict_class, device=device
+            )
 
 
 class HeteroSTHN_Interface(nn.Module):
@@ -1240,23 +1281,30 @@ class HeteroSTHN_Interface(nn.Module):
     异构STHN接口 - 保持与原有STHN_Interface完全相同的外部接口
     整合所有异构组件：HeteroPatch_Encoding + HeteroEdgePredictor_per_node
     """
-    def __init__(self, mlp_mixer_configs, edge_predictor_configs, edge_types: list = None):
+
+    def __init__(
+        self, mlp_mixer_configs, edge_predictor_configs, edge_types: list = None
+    ):
         super(HeteroSTHN_Interface, self).__init__()
 
         self.time_feats_dim = edge_predictor_configs["dim_in_time"]
         self.node_feats_dim = edge_predictor_configs["dim_in_node"]
-        self.edge_types = edge_types or ['0']  # 🆕 NEW: 支持边类型（原来没有）
+        self.edge_types = edge_types or ["0"]  # 🆕 NEW: 支持边类型（原来没有）
 
         # 🆕 NEW: 使用异构组件替代原有组件
         if self.time_feats_dim > 0:
             # 传递边类型信息给mlp_mixer_configs
-            mlp_mixer_configs['edge_types'] = self.edge_types  # 🆕 NEW: 添加边类型配置
-            self.base_model = HeteroPatch_Encoding(**mlp_mixer_configs)  # 🆕 NEW: 使用异构Patch编码器
-        
+            mlp_mixer_configs["edge_types"] = self.edge_types  # 🆕 NEW: 添加边类型配置
+            self.base_model = HeteroPatch_Encoding(
+                **mlp_mixer_configs
+            )  # 🆕 NEW: 使用异构Patch编码器
+
         # 传递边类型信息给edge_predictor_configs
-        edge_predictor_configs['edge_types'] = self.edge_types  # 🆕 NEW: 添加边类型配置
-        self.edge_predictor = HeteroEdgePredictor_per_node(**edge_predictor_configs)  # 🆕 NEW: 使用异构边预测器
-        
+        edge_predictor_configs["edge_types"] = self.edge_types  # 🆕 NEW: 添加边类型配置
+        self.edge_predictor = HeteroEdgePredictor_per_node(
+            **edge_predictor_configs
+        )  # 🆕 NEW: 使用异构边预测器
+
         # 损失函数保持不变
         self.criterion = nn.BCEWithLogitsLoss(reduction="mean")
         self.reset_parameters()
@@ -1266,46 +1314,52 @@ class HeteroSTHN_Interface(nn.Module):
             self.base_model.reset_parameters()
         self.edge_predictor.reset_parameters()
 
-    def forward(self, model_inputs, neg_samples, node_feats):  # 🆕 NEW: 新增edge_types参数
+    def forward(
+        self, model_inputs, neg_samples, node_feats
+    ):  # 🆕 NEW: 新增edge_types参数
         """
         前向传播 - 保持与原有STHN_Interface相同的接口（只是新增了可选的edge_types参数）
-        
+
         Args:
             model_inputs: 模型输入（边特征、时间戳、batch_size、索引）
             neg_samples: 负采样数量
             node_feats: 节点特征
             edge_types: 边类型（🆕 NEW: 新增参数，可选）
-        
+
         Returns:
             tuple: (loss, all_pred, all_edge_label) - 与原来完全相同的输出格式
         """
         edge_feats = model_inputs[0]
         # edge_feats是边类型的onehot编码，需要转回边类型数组
         edge_types = torch.argmax(edge_feats, dim=1)
-        pred_pos, pred_neg = self.predict(model_inputs, neg_samples, node_feats, edge_types)
-        
+        pred_pos, pred_neg = self.predict(
+            model_inputs, neg_samples, node_feats, edge_types
+        )
+
         # 损失计算逻辑与原来完全相同
         all_pred_logits = torch.cat((pred_pos, pred_neg), dim=0)
         all_edge_label = torch.cat(
             (torch.ones_like(pred_pos), torch.zeros_like(pred_neg)), dim=0
         )
         loss = self.criterion(all_pred_logits, all_edge_label).mean()
-        
+
         # 返回 sigmoid 激活后的概率值
         all_pred_prob = torch.sigmoid(all_pred_logits)
-        
+
         return loss, all_pred_prob, all_edge_label
 
-    def predict(self, model_inputs, neg_samples, node_feats, edge_types=None):  # 🆕 NEW: 新增edge_types参数
+    def predict(
+        self, model_inputs, neg_samples, node_feats, edge_types=None
+    ):  # 🆕 NEW: 新增edge_types参数
         """
         预测方法 - 保持与原有STHN_Interface相同的逻辑，但支持边类型
-        
+
         Args:
             model_inputs: 模型输入
-            neg_samples: 负采样数量  
+            neg_samples: 负采样数量
             node_feats: 节点特征
             edge_types: 边类型（🆕 NEW: 新增参数，可选）
-        
+
         Returns:
             tuple: (正边预测, 负边预测)
         """
@@ -1320,7 +1374,7 @@ class HeteroSTHN_Interface(nn.Module):
         else:
             # 原有的4元素版本
             model_inputs_for_base = model_inputs
-        
+
         # 特征提取逻辑与原来相同，但传递边类型信息
         if self.time_feats_dim > 0 and self.node_feats_dim == 0:
             # 🆕 NEW: 向异构Patch编码器传递边类型信息
@@ -1335,7 +1389,9 @@ class HeteroSTHN_Interface(nn.Module):
             logging.info("Either time_feats_dim or node_feats_dim must larger than 0!")
 
         # 🆕 NEW: 向异构边预测器传递边类型信息
-        pred_pos, pred_neg = self.edge_predictor(x, neg_samples=neg_samples, edge_types=edge_types)
+        pred_pos, pred_neg = self.edge_predictor(
+            x, neg_samples=neg_samples, edge_types=edge_types
+        )
         return pred_pos, pred_neg
 
 
@@ -1343,21 +1399,24 @@ class HeteroMulticlass_Interface(nn.Module):
     """
     异构多分类接口 - 基于原有Multiclass_Interface扩展
     """
-    def __init__(self, mlp_mixer_configs, edge_predictor_configs, edge_types: list = None):
+
+    def __init__(
+        self, mlp_mixer_configs, edge_predictor_configs, edge_types: list = None
+    ):
         super(HeteroMulticlass_Interface, self).__init__()
 
         self.time_feats_dim = edge_predictor_configs["dim_in_time"]
         self.node_feats_dim = edge_predictor_configs["dim_in_node"]
-        self.edge_types = edge_types or ['0']  # 🆕 NEW: 支持边类型
+        self.edge_types = edge_types or ["0"]  # 🆕 NEW: 支持边类型
 
         # 🆕 NEW: 使用异构组件
         if self.time_feats_dim > 0:
-            mlp_mixer_configs['edge_types'] = self.edge_types
+            mlp_mixer_configs["edge_types"] = self.edge_types
             self.base_model = HeteroPatch_Encoding(**mlp_mixer_configs)
 
-        edge_predictor_configs['edge_types'] = self.edge_types
+        edge_predictor_configs["edge_types"] = self.edge_types
         self.edge_predictor = HeteroEdgePredictor_per_node(**edge_predictor_configs)
-        
+
         # 多分类损失函数
         self.criterion = nn.CrossEntropyLoss(reduction="mean")
         self.reset_parameters()
@@ -1367,20 +1426,26 @@ class HeteroMulticlass_Interface(nn.Module):
             self.base_model.reset_parameters()
         self.edge_predictor.reset_parameters()
 
-    def forward(self, model_inputs, neg_samples, node_feats, edge_types=None):  # 🆕 NEW: 新增edge_types参数
+    def forward(
+        self, model_inputs, neg_samples, node_feats, edge_types=None
+    ):  # 🆕 NEW: 新增edge_types参数
         """
         前向传播 - 保持与原有Multiclass_Interface相同的接口
         """
         # 🆕 NEW: 处理包含边类型的model_inputs
-        if len(model_inputs) == 6:  # [edge_feats, edge_ts, batch_size, inds, pos_edge_label, edge_types]
+        if (
+            len(model_inputs) == 6
+        ):  # [edge_feats, edge_ts, batch_size, inds, pos_edge_label, edge_types]
             pos_edge_label = model_inputs[-2].view(-1, 1)
             edge_types = model_inputs[-1] if edge_types is None else edge_types
             model_inputs_for_predict = model_inputs[:-2]
         else:  # 原有格式 [edge_feats, edge_ts, batch_size, inds, pos_edge_label]
             pos_edge_label = model_inputs[-1].view(-1, 1)
             model_inputs_for_predict = model_inputs[:-1]
-        
-        pred_pos, pred_neg = self.predict(model_inputs_for_predict, neg_samples, node_feats, edge_types)
+
+        pred_pos, pred_neg = self.predict(
+            model_inputs_for_predict, neg_samples, node_feats, edge_types
+        )
 
         # 损失计算逻辑与原来相同
         all_pred_logits = torch.cat((pred_pos, pred_neg), dim=0)
@@ -1388,13 +1453,15 @@ class HeteroMulticlass_Interface(nn.Module):
             (torch.ones_like(pred_pos), torch.zeros_like(pred_neg)), dim=0
         )
         loss = self.criterion(all_pred_logits, all_edge_label).mean()
-        
+
         # 返回 sigmoid 激活后的概率值
         all_pred_prob = torch.sigmoid(all_pred_logits)
 
         return loss, all_pred_prob, all_edge_label
 
-    def predict(self, model_inputs, neg_samples, node_feats, edge_types=None):  # 🆕 NEW: 新增edge_types参数
+    def predict(
+        self, model_inputs, neg_samples, node_feats, edge_types=None
+    ):  # 🆕 NEW: 新增edge_types参数
         """
         预测方法 - 与HeteroSTHN_Interface的predict方法相同
         """
@@ -1405,7 +1472,7 @@ class HeteroMulticlass_Interface(nn.Module):
             model_inputs_for_base = [edge_feats, edge_ts, batch_size, inds]
         else:
             model_inputs_for_base = model_inputs
-        
+
         # 特征提取
         if self.time_feats_dim > 0 and self.node_feats_dim == 0:
             x = self.base_model(*model_inputs_for_base, edge_types)
@@ -1417,16 +1484,24 @@ class HeteroMulticlass_Interface(nn.Module):
         else:
             logging.info("Either time_feats_dim or node_feats_dim must larger than 0!")
 
-        pred_pos, pred_neg = self.edge_predictor(x, neg_samples=neg_samples, edge_types=edge_types)
+        pred_pos, pred_neg = self.edge_predictor(
+            x, neg_samples=neg_samples, edge_types=edge_types
+        )
         return pred_pos, pred_neg
-    
+
+
 from riemanngfm.modules.model import GeoGFM
 
+
 class RiemannianStructuralEncoder(nn.Module):
-    def __init__(self, n_layers, in_dim, hidden_dim, embed_dim, bias, activation, dropout):
+    def __init__(
+        self, n_layers, in_dim, hidden_dim, embed_dim, bias, activation, dropout
+    ):
         super().__init__()
         # 直接实例化 GeoGFM 作为我们的编码器
-        self.gfgm_model = GeoGFM(n_layers, in_dim, hidden_dim, embed_dim, bias, activation, dropout)
+        self.gfgm_model = GeoGFM(
+            n_layers, in_dim, hidden_dim, embed_dim, bias, activation, dropout
+        )
 
     def forward(self, structural_data):
         """
@@ -1442,13 +1517,13 @@ class RiemannianStructuralEncoder(nn.Module):
         manifold_S = self.gfgm_model.manifold_S
         x_h_tangent = manifold_H.logmap0(x_H)
         x_s_tangent = manifold_S.logmap0(x_S)
-        
+
         # 将欧几里得表示和另外两个空间的切空间表示拼接起来
         # 注意：这里的 x_E 是从拉普拉斯特征分解得到的初始结构表示，而非节点原始特征
         structural_embedding = torch.cat([x_E, x_h_tangent, x_s_tangent], dim=-1)
-        
+
         return structural_embedding
-    
+
     def reset_parameters(self):
         """
         重置此模块及其所有子模块的参数。
@@ -1456,54 +1531,65 @@ class RiemannianStructuralEncoder(nn.Module):
         # 遍历 gfgm_model 中的所有子模块
         for module in self.gfgm_model.modules():
             # 检查子模块是否有名为 'reset_parameters' 的方法
-            if hasattr(module, 'reset_parameters'):
+            if hasattr(module, "reset_parameters"):
                 # 调用该方法来重置其权重
                 module.reset_parameters()
+
+
 class HeteroSTHN_Interface_rgfm(nn.Module):
     """
     集成了黎曼结构编码器的异构STHN接口。
     该版本期望 structural_data 对象在外部被构建好后传入。
     """
-    def __init__(self, mlp_mixer_configs: dict, edge_predictor_configs: dict, edge_types: list = None,
-                 riemannian_configs: dict = None):
+
+    def __init__(
+        self,
+        mlp_mixer_configs: dict,
+        edge_predictor_configs: dict,
+        edge_types: list = None,
+        riemannian_configs: dict = None,
+    ):
         super(HeteroSTHN_Interface_rgfm, self).__init__()
 
         self.time_feats_dim = edge_predictor_configs["dim_in_time"]
         self.node_feats_dim = edge_predictor_configs["dim_in_node"]
-        self.edge_types = edge_types or ['0']
+        self.edge_types = edge_types or ["0"]
 
         # 初始化原有的时序特征提取器
         if self.time_feats_dim > 0:
-            mlp_mixer_configs['edge_types'] = self.edge_types
+            mlp_mixer_configs["edge_types"] = self.edge_types
             self.base_model = HeteroPatch_Encoding(**mlp_mixer_configs)
 
         # 初始化原有的边预测器
-        edge_predictor_configs['edge_types'] = self.edge_types
+        edge_predictor_configs["edge_types"] = self.edge_types
         self.edge_predictor = HeteroEdgePredictor_per_node(**edge_predictor_configs)
-        
+
         # 损失函数保持不变
         self.criterion = nn.BCEWithLogitsLoss(reduction="mean")
-        
+
         # 🆕 NEW: 初始化黎曼结构编码器和融合层
         self.use_riemannian = riemannian_configs is not None
         if self.use_riemannian:
             self.riemannian_encoder = RiemannianStructuralEncoder(**riemannian_configs)
-            
+
             # 定义一个融合层，将时序特征和结构特征结合起来
-            temporal_dim = mlp_mixer_configs.get('out_channels', 0)
+            temporal_dim = mlp_mixer_configs.get("out_channels", 0)
             if self.node_feats_dim > 0:
                 temporal_dim += self.node_feats_dim
 
-            structural_dim = 3 * riemannian_configs.get('embed_dim', 0)
+            structural_dim = 3 * riemannian_configs.get("embed_dim", 0)
             # 🆕 添加动态对齐层
             self.dynamic_alignment = DynamicAlignmentLayer(structural_dim)
-            
-            predictor_input_dim = edge_predictor_configs["dim_in_time"] + edge_predictor_configs["dim_in_node"]
-            
+
+            predictor_input_dim = (
+                edge_predictor_configs["dim_in_time"]
+                + edge_predictor_configs["dim_in_node"]
+            )
+
             self.fusion_layer = nn.Sequential(
                 nn.Linear(temporal_dim + structural_dim, predictor_input_dim * 2),
                 nn.ReLU(),
-                nn.Linear(predictor_input_dim * 2, predictor_input_dim)
+                nn.Linear(predictor_input_dim * 2, predictor_input_dim),
             )
 
         self.reset_parameters()
@@ -1518,50 +1604,73 @@ class HeteroSTHN_Interface_rgfm(nn.Module):
                 if isinstance(layer, nn.Linear):
                     layer.reset_parameters()
 
-    def forward(self, model_inputs, neg_samples, node_feats,
-                # 🆕 NEW: forward函数新增 structural_data 参数
-                structural_data: Data = None):
-        
-        edge_feats = model_inputs[0]
-        edge_types = torch.argmax(edge_feats, dim=1) if edge_feats.ndim == 2 and edge_feats.shape[1] > 1 else None
+    def forward(
+        self,
+        model_inputs,
+        neg_samples,
+        node_feats,
+        # 🆕 NEW: forward函数新增 structural_data 参数
+        structural_data: Data = None,
+    ):
 
-        pred_pos, pred_neg,h_save = self.predict(model_inputs, neg_samples, node_feats, edge_types, structural_data)
-        
+        edge_feats = model_inputs[0]
+        edge_types = (
+            torch.argmax(edge_feats, dim=1)
+            if edge_feats.ndim == 2 and edge_feats.shape[1] > 1
+            else None
+        )
+
+        pred_pos, pred_neg, h_save = self.predict(
+            model_inputs, neg_samples, node_feats, edge_types, structural_data
+        )
+
         # 损失计算逻辑完全不变
         all_pred_logits = torch.cat((pred_pos, pred_neg), dim=0)
         all_edge_label = torch.cat(
             (torch.ones_like(pred_pos), torch.zeros_like(pred_neg)), dim=0
         )
         loss = self.criterion(all_pred_logits, all_edge_label).mean()
-        
+
         # 返回 sigmoid 激活后的概率值
         all_pred_prob = torch.sigmoid(all_pred_logits)
-        
-        return loss, all_pred_prob, all_edge_label,h_save
 
-    def predict(self, model_inputs, neg_samples, node_feats, edge_types=None,
-                # 🆕 NEW: predict函数也接收 structural_data
-                structural_data: Data = None):
-        
+        return loss, all_pred_prob, all_edge_label, h_save
+
+    def predict(
+        self,
+        model_inputs,
+        neg_samples,
+        node_feats,
+        edge_types=None,
+        # 🆕 NEW: predict函数也接收 structural_data
+        structural_data: Data = None,
+    ):
+
         model_inputs_for_base = model_inputs[:4]
-        
+
         # --- 步骤1: 提取原有的时序/特征嵌入 ---
         x_temporal = None
         if self.time_feats_dim > 0:
             # base_model的输出对应于批次中的 "root_nodes"
             x_temporal = self.base_model(*model_inputs_for_base, edge_types)
-        
+
         if node_feats is not None and self.node_feats_dim > 0:
-            x_temporal = torch.cat([x_temporal, node_feats], dim=1) if x_temporal is not None else node_feats
+            x_temporal = (
+                torch.cat([x_temporal, node_feats], dim=1)
+                if x_temporal is not None
+                else node_feats
+            )
 
         # --- 步骤2 & 3: 提取、对齐并融合黎曼结构嵌入 ---
         if self.use_riemannian and structural_data is not None:
             if x_temporal is None:
-                raise ValueError("Temporal features must be computed to be fused with structural features.")
+                raise ValueError(
+                    "Temporal features must be computed to be fused with structural features."
+                )
 
             z_struct = self.riemannian_encoder(structural_data)
             # aligned_z_struct = z_struct[structural_data.root_nodes_mask]
-             # 🆕 使用动态对齐层
+            # 🆕 使用动态对齐层
             target_batch_size = x_temporal.shape[0]
             aligned_z_struct = self.dynamic_alignment(z_struct, target_batch_size)
             final_x = torch.cat([x_temporal, aligned_z_struct], dim=1)
@@ -1570,28 +1679,31 @@ class HeteroSTHN_Interface_rgfm(nn.Module):
             final_x = x_temporal
 
         if final_x is None:
-            raise ValueError("No features were generated. Check your model's feature dimension settings.")
+            raise ValueError(
+                "No features were generated. Check your model's feature dimension settings."
+            )
 
         # --- 步骤4: 使用最终特征进行预测 ---
-        pred_pos, pred_neg, _ = self.edge_predictor(final_x, neg_samples=neg_samples, edge_types=edge_types)
+        pred_pos, pred_neg, _ = self.edge_predictor(
+            final_x, neg_samples=neg_samples, edge_types=edge_types
+        )
         num_edge = aligned_z_struct.shape[0] // (neg_samples + 2)
-        h_save = aligned_z_struct[:2 * num_edge]
-        return pred_pos, pred_neg,h_save
-    
+        # h_save = aligned_z_struct[: 2 * num_edge]
+        h_save = final_x[: 2 * num_edge]
+        return pred_pos, pred_neg, h_save
 
 
 class DynamicAlignmentLayer(nn.Module):
     """动态对齐层，将任意长度的结构特征对齐到目标长度"""
+
     def __init__(self, feature_dim):
         super().__init__()
         self.feature_dim = feature_dim
         # 可学习的注意力权重
         self.attention = nn.Sequential(
-            nn.Linear(feature_dim, feature_dim),
-            nn.Tanh(),
-            nn.Linear(feature_dim, 1)
+            nn.Linear(feature_dim, feature_dim), nn.Tanh(), nn.Linear(feature_dim, 1)
         )
-        
+
     def forward(self, z_struct, target_length):
         """
         Args:
@@ -1601,14 +1713,16 @@ class DynamicAlignmentLayer(nn.Module):
             aligned_features: [target_length, feature_dim] 对齐后的特征
         """
         source_length = z_struct.shape[0]
-        
+
         if source_length == target_length:
             return z_struct
         elif source_length > target_length:
             # 使用注意力机制选择最重要的特征
             attention_weights = self.attention(z_struct)  # [source_length, 1]
-            attention_weights = torch.softmax(attention_weights.squeeze(-1), dim=0)  # [source_length]
-            
+            attention_weights = torch.softmax(
+                attention_weights.squeeze(-1), dim=0
+            )  # [source_length]
+
             # 根据注意力权重选择top-k个特征
             _, top_indices = torch.topk(attention_weights, target_length)
             top_indices = torch.sort(top_indices)[0]  # 保持原始顺序
@@ -1618,16 +1732,23 @@ class DynamicAlignmentLayer(nn.Module):
             # 先计算需要多少倍数
             repeat_times = (target_length + source_length - 1) // source_length
             z_repeated = z_struct.repeat(repeat_times, 1)[:target_length]
-            
+
             # 添加可学习的位置调整
-            position_adjust = torch.arange(target_length, device=z_struct.device, dtype=torch.float)
+            position_adjust = torch.arange(
+                target_length, device=z_struct.device, dtype=torch.float
+            )
             position_adjust = position_adjust / target_length  # 归一化到[0,1]
-            position_weight = torch.sigmoid(position_adjust).unsqueeze(1)  # [target_length, 1]
-            
+            position_weight = torch.sigmoid(position_adjust).unsqueeze(
+                1
+            )  # [target_length, 1]
+
             return z_repeated * position_weight
-        
+
+
 class STHN_Interface_rgfm(STHN_Interface):
-    def __init__(self, mlp_mixer_configs, edge_predictor_configs, riemannian_configs=None):
+    def __init__(
+        self, mlp_mixer_configs, edge_predictor_configs, riemannian_configs=None
+    ):
         self.use_riemannian = riemannian_configs is not None
         self.structural_dim = 0
         self.riemannian_encoder = None
@@ -1643,7 +1764,8 @@ class STHN_Interface_rgfm(STHN_Interface):
             if self.node_feats_dim > 0:
                 temporal_dim += self.node_feats_dim
             predictor_dim = (
-                edge_predictor_configs["dim_in_time"] + edge_predictor_configs["dim_in_node"]
+                edge_predictor_configs["dim_in_time"]
+                + edge_predictor_configs["dim_in_node"]
             )
             self.fusion_layer = nn.Sequential(
                 nn.Linear(temporal_dim + self.structural_dim, predictor_dim * 2),
@@ -1660,7 +1782,9 @@ class STHN_Interface_rgfm(STHN_Interface):
                 if isinstance(layer, nn.Linear):
                     layer.reset_parameters()
 
-    def forward(self, model_inputs, neg_samples, node_feats, structural_data: Data = None):
+    def forward(
+        self, model_inputs, neg_samples, node_feats, structural_data: Data = None
+    ):
         pred_pos, pred_neg = self.predict(
             model_inputs, neg_samples, node_feats, structural_data=structural_data
         )
@@ -1672,7 +1796,9 @@ class STHN_Interface_rgfm(STHN_Interface):
         all_pred_prob = torch.sigmoid(all_pred_logits)
         return loss, all_pred_prob, all_edge_label
 
-    def predict(self, model_inputs, neg_samples, node_feats, structural_data: Data = None):
+    def predict(
+        self, model_inputs, neg_samples, node_feats, structural_data: Data = None
+    ):
         if self.time_feats_dim > 0 and self.node_feats_dim == 0:
             x = self.base_model(*model_inputs)
         elif self.time_feats_dim > 0 and self.node_feats_dim > 0:
@@ -1681,7 +1807,9 @@ class STHN_Interface_rgfm(STHN_Interface):
         elif self.time_feats_dim == 0 and self.node_feats_dim > 0:
             x = node_feats
         else:
-            raise ValueError("Either time_feats_dim or node_feats_dim must be larger than 0.")
+            raise ValueError(
+                "Either time_feats_dim or node_feats_dim must be larger than 0."
+            )
 
         if self.use_riemannian and structural_data is not None:
             z_struct = self.riemannian_encoder(structural_data)
@@ -1690,3 +1818,245 @@ class STHN_Interface_rgfm(STHN_Interface):
             x = self.fusion_layer(x)
 
         return self.edge_predictor(x, neg_samples=neg_samples)
+
+
+class HeteroSTHN_Interface_rgfm_loss(nn.Module):
+    """
+    修改版：集成了黎曼结构编码器 + 对称对齐损失。
+    不考虑 node_feats，专注于 x_temporal 和 aligned_z_struct 的结合与对齐。
+    """
+
+    def __init__(
+        self,
+        mlp_mixer_configs: dict,
+        edge_predictor_configs: dict,
+        edge_types: list = None,
+        riemannian_configs: dict = None,
+        alpha: float = 0.2,
+    ):
+        super(HeteroSTHN_Interface_rgfm_loss, self).__init__()
+
+        self.time_feats_dim = edge_predictor_configs["dim_in_time"]
+        self.node_feats_dim = edge_predictor_configs[
+            "dim_in_node"
+        ]  # 仅用于预测器维度参考
+        self.edge_types = edge_types or ["0"]
+        self.alpha = alpha
+
+        # --- 1. 初始化原有的时序特征提取器 ---
+        if self.time_feats_dim > 0:
+            mlp_mixer_configs["edge_types"] = self.edge_types
+            self.base_model = HeteroPatch_Encoding(**mlp_mixer_configs)
+
+        # --- 2. 初始化原有的边预测器 ---
+        edge_predictor_configs["edge_types"] = self.edge_types
+        self.edge_predictor = HeteroEdgePredictor_per_node(**edge_predictor_configs)
+
+        # 损失函数
+        self.criterion = nn.BCEWithLogitsLoss(reduction="mean")
+
+        # --- 3. 对齐损失模块 (Symmetric Alignment Loss) ---
+        self.align_loss_fn = SymmetricAlignmentLoss()
+
+        # 对齐维度 (Project to this dim for alignment)
+        align_dim = mlp_mixer_configs.get("out_channels", 128)
+
+        # Z_t (Temporal) 投影层
+        t_dim = mlp_mixer_configs.get("out_channels", 0)
+        self.proj_t = (
+            nn.Linear(t_dim, align_dim) if t_dim != align_dim else nn.Identity()
+        )
+
+        # --- 4. 初始化黎曼结构编码器和融合层 ---
+        self.use_riemannian = riemannian_configs is not None
+        if self.use_riemannian:
+            self.riemannian_encoder = RiemannianStructuralEncoder(**riemannian_configs)
+
+            # 结构特征维度
+            structural_dim = 3 * riemannian_configs.get("embed_dim", 0)
+            self.dynamic_alignment = DynamicAlignmentLayer(structural_dim)
+
+            # Z_s (Structural) 投影层 🆕 修改点：用于将结构特征投影到对齐维度
+            self.proj_s = nn.Linear(structural_dim, align_dim)
+
+            # 融合层输入维度 🆕 修改点：只包含 temporal + structural，不再包含 node_feats
+            fusion_input_dim = t_dim + structural_dim
+
+            # 预测器输入维度 (保持与edge_predictor定义一致，以便兼容)
+            predictor_input_dim = self.time_feats_dim + self.node_feats_dim
+
+            # 融合层：将 (Time + Struct) -> Predictor Input Dim
+            self.fusion_layer = nn.Sequential(
+                nn.Linear(fusion_input_dim, predictor_input_dim * 2),
+                nn.ReLU(),
+                nn.Linear(predictor_input_dim * 2, predictor_input_dim),
+            )
+
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        if self.time_feats_dim > 0:
+            self.base_model.reset_parameters()
+        self.edge_predictor.reset_parameters()
+
+        if hasattr(self, "proj_t") and isinstance(self.proj_t, nn.Linear):
+            self.proj_t.reset_parameters()
+        # 🆕 重置结构投影层
+        if hasattr(self, "proj_s") and isinstance(self.proj_s, nn.Linear):
+            self.proj_s.reset_parameters()
+
+        if self.use_riemannian:
+            self.riemannian_encoder.reset_parameters()
+            for layer in self.fusion_layer:
+                if isinstance(layer, nn.Linear):
+                    layer.reset_parameters()
+
+    def forward(
+        self, model_inputs, neg_samples, node_feats, structural_data: Data = None
+    ):
+
+        edge_feats = model_inputs[0]
+        edge_types = (
+            torch.argmax(edge_feats, dim=1)
+            if edge_feats.ndim == 2 and edge_feats.shape[1] > 1
+            else None
+        )
+
+        # 获取预测结果和中间特征
+        # z_t: 时序特征, z_s: 结构特征 (替代了原来的 z_x)
+        pred_pos, pred_neg, z_t, z_s = self.predict(
+            model_inputs, neg_samples, node_feats, edge_types, structural_data
+        )
+
+        # 1. 计算主损失 (Task Loss)
+        all_pred_logits = torch.cat((pred_pos, pred_neg), dim=0)
+        all_edge_label = torch.cat(
+            (torch.ones_like(pred_pos), torch.zeros_like(pred_neg)), dim=0
+        )
+        loss_main = self.criterion(all_pred_logits, all_edge_label).mean()
+
+        # 2. 计算对齐损失 (Alignment Loss: Temporal vs. Structural)
+        loss_align = torch.tensor(0.0, device=loss_main.device)
+        if z_t is not None and z_s is not None:
+            # 投影到相同维度
+            z_t_proj = self.proj_t(z_t)
+            z_s_proj = self.proj_s(z_s)  # 🆕 投影结构特征
+            # 计算 JSD (时序 和 结构 之间的一致性)
+            loss_align = self.align_loss_fn(z_t_proj, z_s_proj)
+
+        # 3. 总损失
+        total_loss = loss_main + self.alpha * loss_align
+
+        all_pred_prob = torch.sigmoid(all_pred_logits)
+
+        num_edge = z_s.shape[0] // (neg_samples + 2)
+        z_s = z_s[: 2 * num_edge]
+        z_t = z_t[: 2 * num_edge]
+
+        return total_loss, all_pred_prob, all_edge_label, torch.cat([z_s, z_t], dim=1)
+
+    def predict(
+        self,
+        model_inputs,
+        neg_samples,
+        node_feats,
+        edge_types=None,
+        structural_data: Data = None,
+    ):
+
+        model_inputs_for_base = model_inputs[:4]
+
+        # --- 步骤1: 提取时间特征 (Z_t) ---
+        x_temporal = None
+        if self.time_feats_dim > 0:
+            x_temporal = self.base_model(*model_inputs_for_base, edge_types)
+
+        # 🆕 Z_t 用于对齐，同时也是融合的输入之一
+        z_t = x_temporal
+
+        z_s = None  # 初始化结构特征变量
+        final_x = None
+
+        # --- 步骤2 & 3: 提取、对齐并融合黎曼结构嵌入 ---
+        if self.use_riemannian and structural_data is not None:
+            if x_temporal is None:
+                raise ValueError(
+                    "Temporal features must be computed to be fused with structural features."
+                )
+
+            # 1. 提取黎曼结构特征
+            raw_z_struct = self.riemannian_encoder(structural_data)
+
+            # 2. 动态长度对齐 (将结构特征的长度对齐到 batch_size)
+            target_batch_size = x_temporal.shape[0]
+            aligned_z_struct = self.dynamic_alignment(raw_z_struct, target_batch_size)
+
+            # 🆕 保存结构特征用于 Loss 计算
+            z_s = aligned_z_struct
+
+            # 3. 融合 (Time + Structure)
+            # 🆕 修改点：只拼接 Temporal 和 Structural
+            fusion_input = torch.cat([x_temporal, aligned_z_struct], dim=1)
+            final_x = self.fusion_layer(fusion_input)
+        else:
+            # 如果没有启用黎曼模块，回退到仅使用时序特征
+            final_x = x_temporal
+
+        if final_x is None:
+            raise ValueError("No features were generated.")
+
+        # --- 步骤4: 预测 ---
+        pred_pos, pred_neg, _ = self.edge_predictor(
+            final_x, neg_samples=neg_samples, edge_types=edge_types
+        )
+
+        return pred_pos, pred_neg, z_t, z_s
+
+
+class SymmetricAlignmentLoss(nn.Module):
+    """
+    论文公式 (5) 和 (6) 的实现：基于 Jensen-Shannon Divergence (实际为对称 KL) 的对齐损失。
+
+    Loss = Sigmoid( Sum( KL(Z_t || Z_x) + KL(Z_x || Z_t) ) )
+    """
+
+    def __init__(self):
+        super(SymmetricAlignmentLoss, self).__init__()
+
+    def forward(self, z_t, z_x):
+        """
+        Args:
+            z_t: 时间模态特征 [batch_size, hidden_dim]
+            z_x: 文本/节点模态特征 [batch_size, hidden_dim]
+        """
+        # 1. 转换为概率分布 (Softmax)，确保元素为正且和为1
+        # 使用 log_softmax 为了数值稳定性，因为 KLDivLoss 接收 log_prob
+        p_t = F.softmax(z_t, dim=-1)
+        p_x = F.softmax(z_x, dim=-1)
+
+        log_p_t = F.log_softmax(z_t, dim=-1)
+        log_p_x = F.log_softmax(z_x, dim=-1)
+
+        # 2. 计算 KL 散度
+        # F.kl_div(input, target) 计算 KL(target || input) 或 KL(input || target) 取决于公式
+        # PyTorch KLDivLoss 的公式是: target * (log(target) - input)
+        # 对应数学公式 sum p(x) * log(p(x)/q(x))
+        # 这里 input 应该是 log-probabilities, target 应该是 probabilities
+
+        # JSD term 1: Sum( z_t * log(z_t / z_x) ) = KL(z_t || z_x)
+        kl_t_x = F.kl_div(log_p_x, p_t, reduction="none").sum(dim=-1)
+
+        # JSD term 2: Sum( z_x * log(z_x / z_t) ) = KL(z_x || z_t)
+        kl_x_t = F.kl_div(log_p_t, p_x, reduction="none").sum(dim=-1)
+
+        # 3. 对称求和 (JSD)
+        # jsd_val: [batch_size]
+        jsd_val = kl_t_x + kl_x_t
+
+        # 4. Batch 求和 (公式 5 中的 sum_{i=1}^{|V_B|})
+        total_jsd = jsd_val.sum()
+
+        # 5. Sigmoid 激活 (公式 5)
+        loss_align = torch.sigmoid(total_jsd)
+
+        return loss_align

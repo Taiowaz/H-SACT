@@ -82,6 +82,7 @@ def main(args):
         logging.info("Train link prediction task from scratch ...")
         logging.info("加载模型...")
 
+        model = None
         if args.istrain == 1:
             model, args, link_pred_train = load_model(args)
             if args.num_gpus > 1:
@@ -110,6 +111,9 @@ def main(args):
 
         # 用于测试以及其他实验
         if model is None:
+            # 清空cuda缓存
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
             # 加载训练好的模型
             model, args, _ = load_model(args)
             if args.num_gpus > 1:

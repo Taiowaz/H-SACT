@@ -1,4 +1,5 @@
 import os
+import pandas as pd
 import torch
 import numpy as np
 import logging
@@ -174,15 +175,12 @@ def run(
 
     get_root_nodes(subgraphs, args, mode)
 
-    ###################################################
-    # compute + training + fetch all scores
     loss_lst = []
     MLAUROC.reset()
     MLAUPRC.reset()
 
     hs = []
     for ind in range(len(train_loader)):
-        ###################################################
         inputs, subgraph_node_feats, cur_inds, structual_data = get_inputs_for_ind(
             subgraphs,
             mode,
@@ -265,7 +263,7 @@ def link_pred_train(model, args, g, df, node_feats, edge_feats):
     user_train_total_time = 0
     user_epoch_num = 0
     # 定义早停机制的参数
-    patience = 10  # 允许验证集性能未提升的最大连续轮数
+    patience = 5  # 允许验证集性能未提升的最大连续轮数
     counter = 0  # 记录验证集性能未提升的连续轮数
 
     if args.predict_class:
@@ -415,11 +413,6 @@ def compute_sign_feats(node_feats, df, start_i, num_links, root_nodes, args):
             # 将 SIGN 特征列表中的所有张量在第 0 维堆叠后求和
             sign_feats = torch.sum(torch.stack(sign_feats), dim=0)
 
-        # 将计算得到的 SIGN 特征赋值给对应的根节点
-        # print("_root_ind device:", _root_ind.device)
-        # print("sign_feats device:", sign_feats.device)
-        # print("output_feats device:", output_feats.device)
-        # print("_root_ind device:", _root_ind.device)
         output_feats[_root_ind] = sign_feats[root_nodes[_root_ind]]
 
         # 更新当前处理的边信息的索引
@@ -485,6 +478,8 @@ def test(split_mode, model, args, metric, neg_sampler, g, df, node_feats, edge_f
     all_aps = []
     with torch.no_grad():
         hs = []
+        raw_temporal = []
+        raw_structural = []
         for ind in range(len(test_loader)):
             # Get inputs for current batch
             inputs, subgraph_node_feats, cur_inds, structual_data = get_inputs_for_ind(
@@ -501,6 +496,9 @@ def test(split_mode, model, args, metric, neg_sampler, g, df, node_feats, edge_f
                 args,
             )
 
+            raw_temporal.append(inputs[1].cpu().numpy())
+            raw_structural.append(structual_data.x.cpu().numpy())
+
             # Forward pass
             if args.use_riemannian_structure:
                 loss, pred, edge_label, h_batch = model(
@@ -508,6 +506,7 @@ def test(split_mode, model, args, metric, neg_sampler, g, df, node_feats, edge_f
                 )
             else:
                 loss, pred, edge_label = model(inputs, neg_samples, subgraph_node_feats)
+            print("pred.shape: ", pred.shape)
             split = len(pred) // 2
             hs.append(h_batch.detach().cpu().numpy())
             # mrr指标计算
@@ -540,6 +539,16 @@ def test(split_mode, model, args, metric, neg_sampler, g, df, node_feats, edge_f
                 logging.info(f"Processed {ind} batches...")
         hs = np.array(hs)
         np.savez(f"{args.output_dir}/{args.dataset}_test_hs.npz", hs=hs)
+        raw_temporal = np.array(raw_temporal)
+        np.savez(
+            f"{args.output_dir}/{args.dataset}_test_raw_temporal_feats.npz",
+            raw_temporal=raw_temporal,
+        )
+        raw_structural = np.array(raw_structural)
+        np.savez(
+            f"{args.output_dir}/{args.dataset}_test_raw_structural_feats.npz",
+            raw_structural=raw_structural,
+        )
     pbar.close()
     logging.info(f"Completed prediction for {split_mode} set.")
 
@@ -574,19 +583,67 @@ def test(split_mode, model, args, metric, neg_sampler, g, df, node_feats, edge_f
 
 def get_root_nodes(subgraphs, args, split_mode):
     subgraph_data = subgraphs[0]
+    df_edges = pd.read_csv(
+        f"tgb/DATA/{args.dataset.replace('-','_')}/{args.dataset}_edgelist.csv"
+    )
+
+    ts_col = "timestamp"
+    src_col = "head"
+    dst_col = "tail"
+    if "forum" in args.dataset:
+        ts_col = "ts"
+        src_col = "src"
+        dst_col = "dst"
+    def cal_his_degree(node, node_time):
+        his_df = df_edges[(df_edges[ts_col] < node_time)]
+        his_head = his_df[his_df[src_col] == node]
+        his_tail = his_df[his_df[dst_col] == node]
+        return len(his_head) + len(his_tail)
+
+    # 一个节点构成的头节点、正负样本的的所有节点数量
+    num_nodes_single = args.test_num_neg+2 
     nodes = []
+    degrees = []
+    times = []
     for subgra in subgraph_data:
+        # print("len(subgra): ", len(subgra))
         nodes_dst_batch = []
         nodes_src_batch = []
-        for sub in subgra[: args.batch_size]:
+        degrees_src_batch = []
+        degrees_dst_batch = []
+        times_src_batch = []
+        times_dst_batch = []
+        # 一批中有多少个头节点
+        num_nodes_batch = len(subgra)//num_nodes_single
+        for sub in subgra[: num_nodes_batch]:
             nodes_src_batch.append(sub["root_node"])
-        for sub in subgra[args.batch_size : 2 * args.batch_size]:
+            node_t = sub["root_time"]
+            times_src_batch.append(node_t)
+            his_deg = cal_his_degree(sub["root_node"], node_t)
+            degrees_src_batch.append(his_deg)
+        for sub in subgra[args.batch_size : 2 * num_nodes_batch]:
             nodes_dst_batch.append(sub["root_node"])
+            node_t = sub["root_time"]
+            times_dst_batch.append(node_t)
+            his_deg = cal_his_degree(sub["root_node"], node_t)
+            degrees_dst_batch.append(his_deg)
         nodes.append([nodes_src_batch, nodes_dst_batch])
+        degrees.append([degrees_src_batch, degrees_dst_batch])
+        times.append([times_src_batch, times_dst_batch])
     nodes = np.array(nodes)
     np.savez(
         os.path.join(args.output_dir, f"{args.dataset}_{split_mode}_nodes.npz"),
         nodes=nodes,
+    )
+    degrees = np.array(degrees)
+    np.savez(
+        os.path.join(args.output_dir, f"{args.dataset}_{split_mode}_degrees.npz"),
+        degrees=degrees,
+    )
+    times = np.array(times)
+    np.savez(
+        os.path.join(args.output_dir, f"{args.dataset}_{split_mode}_times.npz"),
+        times=times,
     )
 
 
@@ -767,11 +824,6 @@ def get_eigen_tokens_tensor(edge_index, num_nodes, embed_dim, device):
             continue
 
         try:
-            # print(
-            #     f"Trying strategy {i+1}/{len(strategies)}: k={actual_k}, ncv={ncv}, maxiter={maxiter}, which={which}, tol={tol}"
-            # )
-
-            # 尝试计算特征值和特征向量
             eigenvals, eigvecs_raw = eigs(
                 L, k=actual_k, which=which, ncv=ncv, maxiter=maxiter, tol=tol
             )
@@ -781,29 +833,19 @@ def get_eigen_tokens_tensor(edge_index, num_nodes, embed_dim, device):
 
             # 验证结果的有效性
             if torch.isnan(eigvecs).any() or torch.isinf(eigvecs).any():
-                # print(
-                #     f"Warning: Invalid eigenvectors detected in strategy {i+1}, trying next strategy..."
-                # )
                 eigvecs = None
                 continue
-
-            # print(f"Strategy {i+1} succeeded with k={actual_k} eigenvectors!")
             break
 
         except (ArpackError, np.linalg.LinAlgError, ValueError) as e:
-            # print(f"Strategy {i+1} failed: {str(e)}")
             eigvecs = None
             continue
         except Exception as e:
-            # print(f"Strategy {i+1} failed with unexpected error: {str(e)}")
             eigvecs = None
             continue
 
     # 如果所有ARPACK策略都失败了，尝试备选的数值方法
     if eigvecs is None:
-        # print(
-        #     f"All ARPACK strategies failed for graph of size {num_nodes}. Trying alternative numerical methods..."
-        # )
 
         # 备选方案1：使用scipy的其他特征值求解器
         alternative_methods = [
