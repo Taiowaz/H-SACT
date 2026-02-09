@@ -2,6 +2,6 @@
 requires = [
     "setuptools>=64",
     "wheel",
-    "pybind11"  # <--- 在这里声明构建依赖！
+    "pybind11"  
 ]
 build-backend = "setuptools.build_meta"
