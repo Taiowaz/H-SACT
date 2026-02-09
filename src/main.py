@@ -3,7 +3,6 @@ import os
 import pytz
 from datetime import datetime
 
-# 设置时区为中国时区
 china_tz = pytz.timezone("Asia/Shanghai")
 
 
@@ -18,7 +17,6 @@ from src.train_test import test
 from utils.log import setup_logger
 
 
-# 定义主函数
 def main(args):
     # Start...
     start_overall = timeit.default_timer()
@@ -32,7 +30,7 @@ def main(args):
     result_dir = os.path.join(exper_dir, "result")
     result_filename = f"{result_dir}/{args.dataset}_results.json"
     # 存放模型测试输出结果
-    output_dir =  os.path.join(exper_dir, "output")
+    output_dir = os.path.join(exper_dir, "output")
     os.makedirs(output_dir, exist_ok=True)
     # 创建目录
     os.makedirs(exper_dir, exist_ok=True)
