@@ -1,7 +1,6 @@
 第一步 pip install -e . 将sampler_core.cpp安装上
 
 
-
 问题：
 (geosthn) handb@beihang-WS-C621E-SAGE-Series:~/GeoSTHN$ /home/handb/.conda/envs/geosthn/bin/python /home/handb/GeoSTHN/src/main.py
 

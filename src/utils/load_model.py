@@ -2,6 +2,8 @@ from ast import arg
 import numpy as np
 import logging
 
+from src.model.sthn import HeteroSTHN_Interface_rgfm_loss
+
 
 def load_model(args):
     # get model
@@ -105,12 +107,24 @@ def load_model(args):
                 # "use_hyperbolic": True if args.use_hyperbolic==1 else False,
                 # "use_spherical": True if args.use_spherical==1 else False,
             }
-            model = HeteroSTHN_Interface_rgfm(
-                mlp_mixer_configs=mixer_configs,
-                edge_predictor_configs=edge_predictor_configs,
-                edge_types=args.edge_types,  # 🆕 NEW: 传递边类型
-                riemannian_configs=riemannian_configs,  # 🆕 NEW: 传递黎曼结构配置
-            )
+            if args.use_ali_loss == 1:
+                from src.model.sthn import (
+                    HeteroSTHN_Interface_rgfm_loss as HeteroSTHN_Interface_rgfm,
+                )
+
+                model = HeteroSTHN_Interface_rgfm_loss(
+                    mlp_mixer_configs=mixer_configs,
+                    edge_predictor_configs=edge_predictor_configs,
+                    edge_types=args.edge_types,  # 🆕 NEW: 传递边类型
+                    riemannian_configs=riemannian_configs,  # 🆕 NEW: 传递黎曼结构配置
+                )
+            else:
+                model = HeteroSTHN_Interface_rgfm(
+                    mlp_mixer_configs=mixer_configs,
+                    edge_predictor_configs=edge_predictor_configs,
+                    edge_types=args.edge_types,  # 🆕 NEW: 传递边类型
+                    riemannian_configs=riemannian_configs,  # 🆕 NEW: 传递黎曼结构配置
+                )
         else:
             # 🆕 NEW: 创建异构STHN模型（接口与原有模型几乎相同）
             model = HeteroSTHN_Interface(

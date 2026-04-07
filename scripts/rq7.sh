@@ -8,6 +8,8 @@ common_args="
     --model hetero_sthn
     --use_cached_subgraph
     --use_riemannian_structure
+    --num_run 1
+    --num_epoch 10
 "
 
 
@@ -26,7 +28,7 @@ nohup $run_python $run_file \
     --exper_name ${exper_name} \
     --dataset ${dataset} \
     $common_args \
-    --use_gpu 0 \
+    --use_gpu 1 \
     --device 0 > run_log/run_${dataset}.log 2>&1 &
 echo $! > run_log/run_${dataset}.pid
 

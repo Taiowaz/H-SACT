@@ -82,6 +82,7 @@ def main(args):
         logging.info("Train link prediction task from scratch ...")
         logging.info("加载模型...")
 
+        model = None
         if args.istrain == 1:
             model, args, link_pred_train = load_model(args)
             if args.num_gpus > 1:
