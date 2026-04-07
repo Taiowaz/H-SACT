@@ -17,6 +17,7 @@ from utils.load_data import load_all_data
 from src.train_test import test
 from utils.log import setup_logger
 
+
 # 定义主函数
 def main(args):
     # Start...
@@ -29,7 +30,10 @@ def main(args):
     exper_dir = os.path.join(args.exper_base_dir, exp_name, args.dataset)
     checkpoint_dir = os.path.join(exper_dir, "checkpoint")
     result_dir = os.path.join(exper_dir, "result")
-    result_filename = f"{result_dir}/{args.model}_{args.dataset}_results.json"
+    result_filename = f"{result_dir}/{args.dataset}_results.json"
+    # 存放模型测试输出结果
+    output_dir =  os.path.join(exper_dir, "output")
+    os.makedirs(output_dir, exist_ok=True)
     # 创建目录
     os.makedirs(exper_dir, exist_ok=True)
     os.makedirs(exper_dir, exist_ok=True)
@@ -66,15 +70,6 @@ def main(args):
 
     logging.info("数据加载和预处理完成。")
 
-    # 5. 加载模型
-    # -------------------
-    logging.info("加载模型...")
-    model, args, link_pred_train = load_model(args)
-    if args.num_gpus > 1:
-        model = torch.nn.DataParallel(model)
-    model = model.to(args.device)
-    logging.info(f"模型结构: {model}")
-
     # 6. 定义损失函数和优化器
     # -------------------------------------
     metric = dataset.eval_metric
@@ -82,7 +77,6 @@ def main(args):
     # 7. 训练循环
     # ----------------
     logging.info("开始训练...")
-    model.train()
     for run_idx in range(args.num_run):
         logging.info(
             "-------------------------------------------------------------------------------"
@@ -90,23 +84,20 @@ def main(args):
         logging.info(f">>>>> Run: {run_idx} <<<<<")
         start_run = timeit.default_timer()
 
-        # set the seed for deterministic results...
         torch.manual_seed(run_idx + args.seed)
         set_random_seed(run_idx + args.seed)
 
-        # define an early stopper
         save_model_dir = checkpoint_dir
-        save_model_id = f"{args.model}_{args.dataset}_{args.seed}_{run_idx}"
-        # early_stopper = EarlyStopMonitor(save_model_dir=save_model_dir, save_model_id=save_model_id,
-        #                                 tolerance=TOLERANCE, patience=PATIENCE)
+        save_model_id = f"{args.dataset}_{args.seed}_{run_idx}"
 
-        # ==================================================== Train & Validation
-        # loading the validation negative samples
-
-        # Link prediction
-        start_val = timeit.default_timer()
         logging.info("Train link prediction task from scratch ...")
-
+        logging.info("加载模型...")
+        model, args, link_pred_train = load_model(args)
+        if args.num_gpus > 1:
+            model = torch.nn.DataParallel(model)
+        model = model.to(args.device)
+        logging.info(f"模型结构: {model}")
+        model.train()
         model = link_pred_train(
             model.to(args.device), args, g, df, node_feats, edge_feats
         )
@@ -125,33 +116,18 @@ def main(args):
             f"模型已保存到: {os.path.join(save_model_dir, f'{save_model_id}.pt')}"
         )
 
-        dataset.load_val_ns()
-
-        # Validation ...
-        perf_metrics_val_mean, perf_metrics_val_std, perf_list_val = test(
-            "val",
-            model.to(args.device),
-            args,
-            metric,
-            neg_sampler,
-            g,
-            df,
-            node_feats,
-            edge_feats,
-        )
-        end_val = timeit.default_timer()
-
-        logging.info(f"val: Evaluation Setting: >>> ONE-VS-MANY <<< ")
-        logging.info(
-            f"\tval: {metric}: {perf_metrics_val_mean: .4f} ± {perf_metrics_val_std: .4f}"
-        )
-        val_time = timeit.default_timer() - start_val
-        logging.info(f"\tval: Elapsed Time (s): {val_time: .4f}")
+        args.output_dir = output_dir + f"/run_{run_idx}"
+        os.makedirs(args.output_dir, exist_ok=True)
 
         dataset.load_test_ns()
-        # testing ...
         start_test = timeit.default_timer()
-        perf_metrics_test_mean, perf_metrics_test_std, perf_list_test = test(
+        (
+            perf_mrr_test_mean,
+            perf_mrr_test_std,
+            perf_list_test,
+            auroc_test,
+            auprc_test,
+        ) = test(
             "test",
             model.to(args.device),
             args,
@@ -166,8 +142,9 @@ def main(args):
 
         logging.info(f"Test: Evaluation Setting: >>> ONE-VS-MANY <<< ")
         logging.info(
-            f"\tTest: {metric}: {perf_metrics_test_mean: .4f} ± {perf_metrics_test_std: .4f}"
+            f"\tTest: {metric}: {perf_mrr_test_mean: .4f} ± {perf_mrr_test_std: .4f}"
         )
+        logging.info(f"\tTest: AUROC: {auroc_test: .4f} | AUPRC: {auprc_test: .4f}")
         test_time = timeit.default_timer() - start_test
         logging.info(f"\tTest: Elapsed Time (s): {test_time: .4f}")
 
@@ -177,10 +154,10 @@ def main(args):
                 "data": args.dataset,
                 "run": run_idx,
                 "seed": args.seed,
-                f"val {metric}": f"{perf_metrics_val_mean: .4f}  +- {perf_metrics_val_std: .4f}",
-                f"test {metric}": f"{perf_metrics_test_mean: .4f} +- {perf_metrics_test_std: .4f}",
+                f"test {metric}": f"{perf_mrr_test_mean: .4f} +- {perf_mrr_test_std: .4f}",
+                "test auroc": f"{auroc_test: .4f}",
+                "test auprc": f"{auprc_test: .4f}",
                 "test_time": test_time,
-                "tot_train_val_time": val_time,
             },
             result_filename,
         )
