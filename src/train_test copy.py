@@ -63,8 +63,13 @@ def get_inputs_for_ind(
 
     if args.use_riemannian_structure:
         structural_data = create_riemannian_data_snapshot(
-            subgraph_data,
-            args
+            nodes=subgraph_data["nodes"],
+            row=subgraph_data["row"],
+            col=subgraph_data["col"],
+            root_nodes=subgraph_data["root_nodes"],
+            embed_dim=args.rgfm_embed_dim,
+            device=args.device,
+            dataset_name=args.dataset,
         )
     else:
         structural_data = None
@@ -112,7 +117,6 @@ def get_inputs_for_ind(
             subgraph_edts.to(args.device),
             len(has_temporal_neighbors),
             torch.tensor(all_inds).long(),
-            torch.from_numpy(elabel[ind]).to(args.device),
         ]
     else:
         subgraph_edge_type = elabel[ind]
@@ -123,6 +127,7 @@ def get_inputs_for_ind(
             torch.tensor(all_inds).long(),
             torch.from_numpy(subgraph_edge_type).to(args.device),
         ]
+
     return inputs, subgraph_node_feats, cur_inds, structural_data
 
 
@@ -167,15 +172,12 @@ def run(
     pbar = tqdm(total=len(train_loader))
     pbar.set_description("%s mode with negative samples %d ..." % (mode, neg_samples))
 
-    get_root_nodes(subgraphs, args, mode)
-
     ###################################################
     # compute + training + fetch all scores
     loss_lst = []
     MLAUROC.reset()
     MLAUPRC.reset()
-    
-    hs = []
+
     for ind in range(len(train_loader)):
         ###################################################
         inputs, subgraph_node_feats, cur_inds, structual_data = get_inputs_for_ind(
@@ -194,12 +196,11 @@ def run(
 
         start_time = time.time()
         if args.use_riemannian_structure:
-            loss, pred, edge_label, h_batch = model(
+            loss, pred, edge_label = model(
                 inputs, neg_samples, subgraph_node_feats, structual_data
             )
         else:
             loss, pred, edge_label = model(inputs, neg_samples, subgraph_node_feats)
-        hs.append(h_batch.detach().cpu().numpy())
         if mode == "train" and optimizer != None:
             optimizer.zero_grad()
             if isinstance(loss, torch.Tensor) and loss.dim() > 0:
@@ -216,8 +217,6 @@ def run(
             loss_lst.append(float(loss))
 
         pbar.update(1)
-    
-    np.savez(f"aux-exp/RQ5/data/{args.dataset}_{mode}_hs.npz",hs=np.array(hs))
     pbar.close()
     total_auroc = MLAUROC.compute()
     total_auprc = MLAUPRC.compute()
@@ -230,10 +229,7 @@ def run(
 
 def link_pred_train(model, args, g, df, node_feats, edge_feats):
 
-    # optimizer = torch.optim.RMSprop(
-    #     model.parameters(), lr=args.lr, weight_decay=args.weight_decay
-    # )
-    optimizer = torch.optim.Adam(
+    optimizer = torch.optim.RMSprop(
         model.parameters(), lr=args.lr, weight_decay=args.weight_decay
     )
     ###################################################
@@ -441,7 +437,6 @@ def test(split_mode, model, args, metric, neg_sampler, g, df, node_feats, edge_f
         negative_sampler=neg_sampler,
         split_mode=split_mode,
     )
-    get_root_nodes(test_subgraphs, args, "test")
 
     # Get current dataframe based on split mode
     if split_mode == "test":
@@ -483,7 +478,6 @@ def test(split_mode, model, args, metric, neg_sampler, g, df, node_feats, edge_f
     all_aucs = []
     all_aps = []
     with torch.no_grad():
-        hs = []
         for ind in range(len(test_loader)):
             # Get inputs for current batch
             inputs, subgraph_node_feats, cur_inds, structual_data = get_inputs_for_ind(
@@ -502,13 +496,13 @@ def test(split_mode, model, args, metric, neg_sampler, g, df, node_feats, edge_f
 
             # Forward pass
             if args.use_riemannian_structure:
-                loss, pred, edge_label,h_batch = model(
+                loss, pred, edge_label = model(
                     inputs, neg_samples, subgraph_node_feats, structual_data
                 )
             else:
                 loss, pred, edge_label = model(inputs, neg_samples, subgraph_node_feats)
             split = len(pred) // 2
-            hs.append(h_batch.detach().cpu().numpy())
+
             # mrr指标计算
             perf_list.append(evaluate_mrr(pred, neg_samples))
             pbar.update(1)
@@ -537,8 +531,7 @@ def test(split_mode, model, args, metric, neg_sampler, g, df, node_feats, edge_f
             # Log progress
             if ind % 100 == 0:
                 logging.info(f"Processed {ind} batches...")
-        hs = np.array(hs)
-        np.savez(f"aux-exp/RQ5/data/{args.dataset}_test_hs.npz",hs=hs)
+
     pbar.close()
     logging.info(f"Completed prediction for {split_mode} set.")
 
@@ -578,22 +571,6 @@ def test(split_mode, model, args, metric, neg_sampler, g, df, node_feats, edge_f
 
     return (perf_metrics_mean, perf_metrics_std, perf_list, auc, ap)
 
-def get_root_nodes(subgraphs, args,split_mode):
-    subgraph_data = subgraphs[0]
-    nodes = []
-    for subgra in subgraph_data:
-        nodes_dst_batch = []
-        nodes_src_batch = []
-        for sub in subgra[:args.batch_size]:
-            nodes_src_batch.append(sub["root_node"])
-        for sub in subgra[args.batch_size:2*args.batch_size]:
-            nodes_dst_batch.append(sub["root_node"])
-        nodes.append([nodes_src_batch, nodes_dst_batch])
-    nodes = np.array(nodes)
-    np.savez(
-        os.path.join("aux-exp/RQ5/data", f'{args.dataset}_{split_mode}_nodes.npz'),
-        nodes=nodes
-    )
 
 import torch
 import networkx as nx
@@ -783,9 +760,9 @@ def get_eigen_tokens_tensor(edge_index, num_nodes, embed_dim, device):
             continue
 
         try:
-            # print(
-            #     f"Trying strategy {i+1}/{len(strategies)}: k={actual_k}, ncv={ncv}, maxiter={maxiter}, which={which}, tol={tol}"
-            # )
+            print(
+                f"Trying strategy {i+1}/{len(strategies)}: k={actual_k}, ncv={ncv}, maxiter={maxiter}, which={which}, tol={tol}"
+            )
 
             # 尝试计算特征值和特征向量
             eigenvals, eigvecs_raw = eigs(
@@ -797,29 +774,29 @@ def get_eigen_tokens_tensor(edge_index, num_nodes, embed_dim, device):
 
             # 验证结果的有效性
             if torch.isnan(eigvecs).any() or torch.isinf(eigvecs).any():
-                # print(
-                #     f"Warning: Invalid eigenvectors detected in strategy {i+1}, trying next strategy..."
-                # )
+                print(
+                    f"Warning: Invalid eigenvectors detected in strategy {i+1}, trying next strategy..."
+                )
                 eigvecs = None
                 continue
 
-            # print(f"Strategy {i+1} succeeded with k={actual_k} eigenvectors!")
+            print(f"Strategy {i+1} succeeded with k={actual_k} eigenvectors!")
             break
 
         except (ArpackError, np.linalg.LinAlgError, ValueError) as e:
-            # print(f"Strategy {i+1} failed: {str(e)}")
+            print(f"Strategy {i+1} failed: {str(e)}")
             eigvecs = None
             continue
         except Exception as e:
-            # print(f"Strategy {i+1} failed with unexpected error: {str(e)}")
+            print(f"Strategy {i+1} failed with unexpected error: {str(e)}")
             eigvecs = None
             continue
 
     # 如果所有ARPACK策略都失败了，尝试备选的数值方法
     if eigvecs is None:
-        # print(
-        #     f"All ARPACK strategies failed for graph of size {num_nodes}. Trying alternative numerical methods..."
-        # )
+        print(
+            f"All ARPACK strategies failed for graph of size {num_nodes}. Trying alternative numerical methods..."
+        )
 
         # 备选方案1：使用scipy的其他特征值求解器
         alternative_methods = [
@@ -835,7 +812,7 @@ def get_eigen_tokens_tensor(edge_index, num_nodes, embed_dim, device):
 
             try:
                 if method_info["method"] == "dense_eigh":
-                    # print("Trying dense eigenvalue decomposition...")
+                    print("Trying dense eigenvalue decomposition...")
                     L_dense = L.toarray()
                     eigenvals, eigvecs_raw = np.linalg.eigh(L_dense)
                     # 取前k个最小的特征值对应的特征向量
@@ -843,11 +820,11 @@ def get_eigen_tokens_tensor(edge_index, num_nodes, embed_dim, device):
                     eigvecs = (
                         torch.from_numpy(eigvecs_raw[:, :k_actual]).float().to(device)
                     )
-                    # print(f"Dense method succeeded with {k_actual} eigenvectors!")
+                    print(f"Dense method succeeded with {k_actual} eigenvectors!")
                     break
 
                 elif method_info["method"] == "lobpcg":
-                    # print("Trying LOBPCG method...")
+                    print("Trying LOBPCG method...")
                     from scipy.sparse.linalg import lobpcg
 
                     k_actual = min(k, num_nodes // 4)
@@ -858,18 +835,18 @@ def get_eigen_tokens_tensor(edge_index, num_nodes, embed_dim, device):
                             L, X, largest=False, maxiter=maxiter
                         )
                         eigvecs = torch.from_numpy(eigvecs_raw).float().to(device)
-                        # print(f"LOBPCG method succeeded with {k_actual} eigenvectors!")
+                        print(f"LOBPCG method succeeded with {k_actual} eigenvectors!")
                         break
 
             except Exception as e:
-                # print(f"Alternative method {method_info['method']} failed: {str(e)}")
+                print(f"Alternative method {method_info['method']} failed: {str(e)}")
                 continue
 
     # 如果数值方法也失败了，使用图结构的备选方案
     if eigvecs is None:
-        # print(
-        #     "All numerical methods failed. Using graph-structure-based alternatives..."
-        # )
+        print(
+            "All numerical methods failed. Using graph-structure-based alternatives..."
+        )
 
         structure_methods = [
             "degree_based",
@@ -882,7 +859,7 @@ def get_eigen_tokens_tensor(edge_index, num_nodes, embed_dim, device):
         for method in structure_methods:
             try:
                 if method == "degree_based":
-                    # print("Using degree-based encoding...")
+                    print("Using degree-based encoding...")
                     # 基于节点度数的编码
                     degrees = np.array(L.sum(axis=1)).flatten()
                     degree_matrix = np.zeros((num_nodes, min(embed_dim, num_nodes)))
@@ -895,7 +872,7 @@ def get_eigen_tokens_tensor(edge_index, num_nodes, embed_dim, device):
                     eigvecs = torch.from_numpy(degree_matrix).float().to(device)
 
                 elif method == "random_walk_based":
-                    # print("Using random walk based encoding...")
+                    print("Using random walk based encoding...")
                     # 基于随机游走的编码
                     P = L.copy()
                     P.data = 1.0 / (P.data + 1e-8)  # 转换为转移概率矩阵
@@ -916,7 +893,7 @@ def get_eigen_tokens_tensor(edge_index, num_nodes, embed_dim, device):
                     )
 
                 elif method == "positional_encoding":
-                    # print("Using positional encoding...")
+                    print("Using positional encoding...")
                     # 位置编码
                     pos_encoding = torch.zeros(num_nodes, embed_dim, device=device)
                     for i in range(embed_dim):
@@ -932,7 +909,7 @@ def get_eigen_tokens_tensor(edge_index, num_nodes, embed_dim, device):
                     eigvecs = pos_encoding
 
                 elif method == "node_id_embedding":
-                    # print("Using node ID embedding...")
+                    print("Using node ID embedding...")
                     # 节点ID嵌入
                     node_embedding = torch.zeros(num_nodes, embed_dim, device=device)
                     for i in range(num_nodes):
@@ -940,20 +917,20 @@ def get_eigen_tokens_tensor(edge_index, num_nodes, embed_dim, device):
                     eigvecs = node_embedding
 
                 else:  # random_initialization
-                    # print("Using random initialization...")
+                    print("Using random initialization...")
                     eigvecs = torch.randn(num_nodes, embed_dim, device=device) * 0.1
 
                 if eigvecs is not None:
-                    # print(f"Successfully generated embeddings using {method}")
+                    print(f"Successfully generated embeddings using {method}")
                     break
 
             except Exception as e:
-                # print(f"Structure method {method} failed: {str(e)}")
+                print(f"Structure method {method} failed: {str(e)}")
                 continue
 
     # 最终的安全网：如果一切都失败了
     if eigvecs is None:
-        # print("All methods failed. Using final fallback...")
+        print("All methods failed. Using final fallback...")
         eigvecs = torch.eye(num_nodes, device=device)[:, : min(embed_dim, num_nodes)]
         if eigvecs.shape[1] < embed_dim:
             padding = torch.zeros(
@@ -977,9 +954,9 @@ def get_eigen_tokens_tensor(edge_index, num_nodes, embed_dim, device):
 
     # 最终的健全性检查和归一化
     if eigvecs.shape != (num_nodes, embed_dim):
-        # print(
-        #     f"Warning: eigvecs shape {eigvecs.shape} doesn't match expected {(num_nodes, embed_dim)}"
-        # )
+        print(
+            f"Warning: eigvecs shape {eigvecs.shape} doesn't match expected {(num_nodes, embed_dim)}"
+        )
         eigvecs = torch.randn(num_nodes, embed_dim, device=device) * 0.1
 
     # 添加归一化以提高数值稳定性
@@ -987,28 +964,121 @@ def get_eigen_tokens_tensor(edge_index, num_nodes, embed_dim, device):
 
     return eigvecs
 
+
+# def create_riemannian_data_snapshot(nodes: list, row: list, col: list, root_nodes: list, embed_dim: int, device: torch.device):
+#     """
+#     根据批次信息构建输入的Data对象。(修复版：确保输出能正确映射回root_nodes)
+#     """
+#     # 🆕 核心修复：保持root_nodes的原始顺序，将历史交互节点追加到后面
+#     # 这样确保前len(root_nodes)个节点就是我们需要的批次节点
+
+#     # 1. 先获取root_nodes中的唯一节点，保持原始顺序
+#     root_nodes_unique = []
+#     root_nodes_seen = set()
+#     for node in root_nodes:
+#         if node not in root_nodes_seen:
+#             root_nodes_unique.append(node)
+#             root_nodes_seen.add(node)
+
+#     # 2. 添加历史交互节点（但排除已经在root_nodes中的节点）
+#     additional_nodes = [node for node in nodes if node not in root_nodes_seen]
+
+#     # 3. 最终的节点顺序：root_nodes的唯一节点在前，历史节点在后
+#     snapshot_global_nodes = root_nodes_unique + additional_nodes
+#     snapshot_global_to_local_map = {global_id: i for i, global_id in enumerate(snapshot_global_nodes)}
+
+#     # 4. 构建原始nodes到新索引的映射
+#     old_local_to_new_local_map = {}
+#     for old_idx, global_id in enumerate(nodes):
+#         if global_id in snapshot_global_to_local_map:
+#             old_local_to_new_local_map[old_idx] = snapshot_global_to_local_map[global_id]
+
+#     num_snapshot_nodes = len(snapshot_global_nodes)
+
+#     # 5. 构建边索引
+#     if len(row) > 0 and len(col) > 0:
+#         valid_edges = []
+#         for r, c in zip(row, col):
+#             if r in old_local_to_new_local_map and c in old_local_to_new_local_map:
+#                 valid_edges.append((old_local_to_new_local_map[r], old_local_to_new_local_map[c]))
+
+#         if valid_edges:
+#             new_row, new_col = zip(*valid_edges)
+#             edge_index = torch.tensor([new_row, new_col], dtype=torch.long, device=device)
+#         else:
+#             edge_index = torch.empty((2, 0), dtype=torch.long, device=device)
+#     else:
+#         edge_index = torch.empty((2, 0), dtype=torch.long, device=device)
+
+#     snapshot_data = Data(num_nodes=num_snapshot_nodes, edge_index=edge_index)
+
+#     # 计算拉普拉斯特征向量
+#     eigvecs = get_eigen_tokens_tensor(snapshot_data.edge_index, snapshot_data.num_nodes, embed_dim, device)
+#     snapshot_data._eigvecs = eigvecs
+#     snapshot_data.tokens = lambda idx: snapshot_data._eigvecs[idx]
+#     snapshot_data.x = snapshot_data.tokens(torch.arange(snapshot_data.num_nodes, device=device))
+
+#     # BFS树构建逻辑保持不变
+#     G = to_networkx(snapshot_data, to_undirected=True)
+#     tree_list = []
+#     for i in range(snapshot_data.num_nodes):
+#         bfs_edges = list(nx.bfs_tree(G, i).edges())
+#         if not bfs_edges:
+#             tree_edge_index = torch.empty((2, 0), dtype=torch.long, device=device)
+#         else:
+#             src_nodes = [edge[0] for edge in bfs_edges]
+#             dst_nodes = [edge[1] for edge in bfs_edges]
+#             tree_edge_index = torch.tensor([src_nodes, dst_nodes], dtype=torch.long, device=device)
+
+#         tree_data = Data(
+#             edge_index=tree_edge_index,
+#             num_nodes=num_snapshot_nodes,
+#             x=torch.zeros(num_snapshot_nodes, eigvecs.shape[1], device=device)
+#         )
+#         tree_list.append(tree_data)
+
+#     snapshot_data.batch_tree = Batch.from_data_list(tree_list)
+
+#     # 🆕 关键修复：建立root_nodes到输出索引的直接映射
+#     snapshot_data.global_n_id = torch.tensor(snapshot_global_nodes, dtype=torch.long, device=device)
+
+#     # 🆕 重要：root_nodes_mask现在直接对应原始root_nodes的顺序
+#     # 因为我们把root_nodes放在了snapshot_global_nodes的前面
+#     root_nodes_local_indices = []
+#     for gid in root_nodes:
+#         # 由于我们的设计，root_nodes中的每个节点都能在snapshot_global_to_local_map中找到
+#         root_nodes_local_indices.append(snapshot_global_to_local_map[gid])
+
+#     snapshot_data.root_nodes_mask = torch.tensor(root_nodes_local_indices, dtype=torch.long, device=device)
+#     snapshot_data.n_id = torch.arange(snapshot_data.num_nodes, device=device)
+
+#     # 🆕 添加批次信息，方便模型使用
+#     snapshot_data.num_root_nodes = len(root_nodes)
+#     snapshot_data.num_unique_root_nodes = len(root_nodes_unique)
+
+#     return snapshot_data.to(device)
+
+
 def create_riemannian_data_snapshot(
-    subgraph_data, args
+    nodes: list,
+    row: list,
+    col: list,
+    root_nodes: list,
+    embed_dim: int,
+    device: torch.device,
+    # 🆕 关键修改 1: 添加 dataset_name 参数
+    dataset_name: str,
 ):
     """
     根据批次信息构建输入的Data对象。
     (最终版：增加了针对特定数据集的星型图采样逻辑)
     """
-    nodes=subgraph_data["nodes"]
-    row=subgraph_data["row"]
-    col=subgraph_data["col"]
-    root_nodes=subgraph_data["root_nodes"]
-    embed_dim=args.rgfm_embed_dim
-    device=args.device
-    dataset_name=args.dataset
+
     # --- Part 1: (不变) 合并节点并创建新的映射与图结构 ---
-    # 批次内所有节点的全局ID集合
     snapshot_global_nodes = sorted(list(set(nodes) | set(root_nodes)))
-    # 全局ID到局部索引的映射, 
     snapshot_global_to_local_map = {
         global_id: i for i, global_id in enumerate(snapshot_global_nodes)
     }
-    # 对于批次内nodes中的每个节点，找到其在新快照中的局部索引，构建映射
     old_local_to_new_local_map = {
         old_idx: snapshot_global_to_local_map.get(global_id)
         for old_idx, global_id in enumerate(nodes)
@@ -1035,12 +1105,10 @@ def create_riemannian_data_snapshot(
     snapshot_data = Data(num_nodes=num_snapshot_nodes, edge_index=edge_index)
 
     # --- Part 2: (不变) 计算拉普拉斯特征并创建 'tokens' 方法 ---
-    # 为每个节点创建一个基于拉普拉斯特征的嵌入向量
     eigvecs = get_eigen_tokens_tensor(
         snapshot_data.edge_index, snapshot_data.num_nodes, embed_dim, device
     )
     snapshot_data._eigvecs = eigvecs
-    # 定义一个方法，根据节点的局部索引返回其对应的拉普拉斯特征向量
     snapshot_data.tokens = lambda idx: snapshot_data._eigvecs[idx]
     snapshot_data.x = snapshot_data.tokens(
         torch.arange(snapshot_data.num_nodes, device=device)
@@ -1097,24 +1165,18 @@ def create_riemannian_data_snapshot(
             )
 
     # --- Part 5: (不变) 存储ID和掩码 ---
-    # 节点的全局ID记录
     snapshot_data.global_n_id = torch.tensor(
         snapshot_global_nodes, dtype=torch.long, device=device
     )
-    # 根节点在新快照中的局部索引
     root_nodes_local_indices = [
         snapshot_global_to_local_map.get(gid)
         for gid in root_nodes
         if gid in snapshot_global_to_local_map
     ]
-    # 根节点在新快照中的局部索引
     snapshot_data.root_nodes_mask = torch.tensor(
         root_nodes_local_indices, dtype=torch.long, device=device
     )
-    # 图中非孤立点的局部索引,num_nodes有问题
     snapshot_data.n_id = torch.arange(snapshot_data.num_nodes, device=device)
-    # 构建一个当前批次节点索引对应于全局节点ID的映射张量
-
 
     return snapshot_data.to(device)
 
