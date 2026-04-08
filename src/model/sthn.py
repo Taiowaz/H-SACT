@@ -6,7 +6,10 @@ import numpy as np
 from torch import Tensor
 import logging
 from torch_geometric.data import Data
-from riemanngfm.modules.model import GeoGFM
+
+from tqdm import tqdm
+from sampler_core import ParallelSampler
+import torch_sparse
 
 
 def get_emb(sin_inp):
@@ -219,6 +222,17 @@ class Summer(nn.Module):
         return tensor + penc
 
 
+"""
+Source: STHN model.py
+URL: https://github.com/celi52/STHN/blob/main/model.py
+"""
+
+
+"""
+Module: Time-encoder
+"""
+
+
 class TimeEncode(nn.Module):
     """
     out = linear(time_scatter): 1-->time_dims
@@ -251,6 +265,13 @@ class TimeEncode(nn.Module):
         output = torch.cos(self.w(t.reshape((-1, 1))))
         return output
 
+
+################################################################################################
+################################################################################################
+################################################################################################
+"""
+Module: STHN
+"""
 
 
 class FeedForward(nn.Module):
@@ -647,6 +668,14 @@ class Patch_Encoding(nn.Module):
         x = self.mlp_head(x)
         return x
 
+
+################################################################################################
+################################################################################################
+################################################################################################
+
+"""
+Edge predictor
+"""
 
 
 class EdgePredictor_per_node(torch.nn.Module):
@@ -1115,7 +1144,7 @@ class HeteroEdgePredictor_per_node(torch.nn.Module):
         self.default_dst_fc.reset_parameters()
         self.default_out_fc.reset_parameters()
 
-    def forward(self, h, neg_samples=1, pred_edge_types=None):  # 🆕 NEW: 新增edge_types参数
+    def forward(self, h, neg_samples=1, edge_types=None):  # 🆕 NEW: 新增edge_types参数
         """
         前向传播 - 保持与原有EdgePredictor_per_node相同的接口
 
@@ -1301,6 +1330,7 @@ class HeteroSTHN_Interface(nn.Module):
             tuple: (loss, all_pred, all_edge_label) - 与原来完全相同的输出格式
         """
         edge_feats = model_inputs[0]
+        # edge_feats是边类型的onehot编码，需要转回边类型数组
         edge_types = torch.argmax(edge_feats, dim=1)
         pred_pos, pred_neg = self.predict(
             model_inputs, neg_samples, node_feats, edge_types
@@ -1729,7 +1759,7 @@ class STHN_Interface_rgfm(STHN_Interface):
             embed_dim = riemannian_configs.get("embed_dim", 0)
             self.structural_dim = 3 * embed_dim
             self.riemannian_encoder = RiemannianStructuralEncoder(**riemannian_configs)
-            # self.dynamic_alignment = DynamicAlignmentLayer(self.structural_dim)
+            self.dynamic_alignment = DynamicAlignmentLayer(self.structural_dim)
             temporal_dim = mlp_mixer_configs.get("out_channels", 0)
             if self.node_feats_dim > 0:
                 temporal_dim += self.node_feats_dim
@@ -1783,11 +1813,7 @@ class STHN_Interface_rgfm(STHN_Interface):
 
         if self.use_riemannian and structural_data is not None:
             z_struct = self.riemannian_encoder(structural_data)
-            if z_struct.shape[0] < structural_data.global_n_id.shape[0]:
-                pad_len = structural_data.global_n_id.shape[0] - z_struct.shape[0]
-                z_struct = F.pad(z_struct, (0, 0, 0, pad_len), "constant", 0)
-            aligned_struct = z_struct[structural_data.root_nodes_mask]
-            # aligned_struct = self.dynamic_alignment(z_struct, x.size(0))
+            aligned_struct = self.dynamic_alignment(z_struct, x.size(0))
             x = torch.cat([x, aligned_struct], dim=1)
             x = self.fusion_layer(x)
 

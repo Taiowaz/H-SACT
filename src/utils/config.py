@@ -69,13 +69,6 @@ def get_args(args=None):
     )
 
     parser.add_argument(
-        "--use_ali_loss",
-        type=int,
-        default=0,
-        help="Embedding dimension for the Riemannian encoder and its initial structural features.",
-    )
-
-    parser.add_argument(
         "--use_riemannian_structure",
         action="store_true",
         default=False,  # Set to True to enable the structural encoder
