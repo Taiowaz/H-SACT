@@ -520,6 +520,7 @@ def test(split_mode, model, args, metric, neg_sampler, g, df, node_feats, edge_f
                 )
             else:
                 loss, pred, edge_label = model(inputs, neg_samples, subgraph_node_feats)
+            print("pred.shape: ", pred.shape)
             split = len(pred) // 2
             hs.append(h_batch.detach().cpu().numpy())
             # mrr指标计算
@@ -617,6 +618,7 @@ def get_root_nodes(subgraphs, args, split_mode):
     nodes = []
     degrees = []
     for subgra in subgraph_data:
+        # print("len(subgra): ", len(subgra))
         nodes_dst_batch = []
         nodes_src_batch = []
         degrees_src_batch = []

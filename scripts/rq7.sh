@@ -1,4 +1,3 @@
-export CUDA_LAUNCH_BLOCKING=1
 run_python="/home/handb/.conda/envs/geosthn/bin/python"
 run_file="/home/handb/GeoSTHN/src/main.py"
 
@@ -9,11 +8,21 @@ common_args="
     --use_cached_subgraph
     --use_riemannian_structure
     --num_run 1
-    --num_epoch 10
+    --num_epoch 5
 "
 
 
-# dataset="thgl-forum-subset"
+dataset="thgl-forum-subset"
+nohup $run_python $run_file \
+    --exper_name ${exper_name} \
+    --dataset ${dataset} \
+    $common_args \
+    --use_gpu 0 \
+    --device 1 > run_log/run_${dataset}.log 2>&1 &
+echo $! > run_log/run_${dataset}.pid
+
+
+# dataset="thgl-github-subset"
 # nohup $run_python $run_file \
 #     --exper_name ${exper_name} \
 #     --dataset ${dataset} \
@@ -21,16 +30,6 @@ common_args="
 #     --use_gpu 0 \
 #     --device 0 > run_log/run_${dataset}.log 2>&1 &
 # echo $! > run_log/run_${dataset}.pid
-# 
-
-dataset="thgl-github-subset"
-nohup $run_python $run_file \
-    --exper_name ${exper_name} \
-    --dataset ${dataset} \
-    $common_args \
-    --use_gpu 1 \
-    --device 0 > run_log/run_${dataset}.log 2>&1 &
-echo $! > run_log/run_${dataset}.pid
 
 
 # dataset="thgl-myket-subset"
@@ -38,8 +37,8 @@ echo $! > run_log/run_${dataset}.pid
 #     --exper_name ${exper_name} \
 #     --dataset ${dataset} \
 #     $common_args \
-#     --use_gpu 0 \
-#     --device 1 > run_log/run_${dataset}.log 2>&1 &
+#     --use_gpu 1 \
+#     --device 0 > run_log/run_${dataset}.log 2>&1 &
 # echo $! > run_log/run_${dataset}.pid
 
 # dataset="thgl-software-subset"
