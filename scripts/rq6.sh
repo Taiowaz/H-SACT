@@ -1,4 +1,3 @@
-export CUDA_LAUNCH_BLOCKING=1
 run_python="/home/handb/.conda/envs/geosthn/bin/python"
 run_file="/home/handb/GeoSTHN/src/main.py"
 

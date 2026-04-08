@@ -15,6 +15,7 @@ def get_args(args=None):
 
     # basic
     parser.add_argument("--dataset", type=str, default="thgl-forum-subset")
+    parser.add_argument("--istrain", type=int, default=1)
     parser.add_argument("--data_dir", type=str, default="DATA")
     parser.add_argument("--test_num_neg", type=int, default=20)
     parser.add_argument("--use_gpu", type=int, default=0, help="use gpu or not")
@@ -58,12 +59,26 @@ def get_args(args=None):
     parser.add_argument("--structure_hops", type=int, default=1)
 
     parser.add_argument("--use_node_cls", action="store_true")
-    parser.add_argument("--use_cached_subgraph", action="store_true", default=False)
+    parser.add_argument("--use_cached_subgraph", action="store_true", default=True)
+
+    parser.add_argument(
+        "--use_ali_loss",
+        type=int,
+        default=0,
+        help="Embedding dimension for the Riemannian encoder and its initial structural features.",
+    )
+
+    parser.add_argument(
+        "--use_ali_loss",
+        type=int,
+        default=0,
+        help="Embedding dimension for the Riemannian encoder and its initial structural features.",
+    )
 
     parser.add_argument(
         "--use_riemannian_structure",
         action="store_true",
-        default=False, # Set to True to enable the structural encoder
+        default=False,  # Set to True to enable the structural encoder
         help="Enable the Riemannian structural encoder to add geometric features.",
     )
     parser.add_argument(
@@ -72,6 +87,7 @@ def get_args(args=None):
         default=32,
         help="Embedding dimension for the Riemannian encoder and its initial structural features.",
     )
+
     parser.add_argument(
         "--rgfm_n_layers",
         type=int,
@@ -91,10 +107,15 @@ def get_args(args=None):
         help="Dropout rate used within the Riemannian encoder.",
     )
 
-
-    parser.add_argument("--use_euclidean", type=int, default=1, help="1 to enable, 0 to disable")
-    parser.add_argument("--use_hyperbolic", type=int, default=1, help="1 to enable, 0 to disable")
-    parser.add_argument("--use_spherical", type=int, default=1, help="1 to enable, 0 to disable")
+    parser.add_argument(
+        "--use_euclidean", type=int, default=1, help="1 to enable, 0 to disable"
+    )
+    parser.add_argument(
+        "--use_hyperbolic", type=int, default=1, help="1 to enable, 0 to disable"
+    )
+    parser.add_argument(
+        "--use_spherical", type=int, default=1, help="1 to enable, 0 to disable"
+    )
     args = parser.parse_args(args)
 
     return args
