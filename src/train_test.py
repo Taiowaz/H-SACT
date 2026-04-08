@@ -172,7 +172,6 @@ def run(
     train_loader = cur_df.groupby(cur_df.index // args.batch_size)
     pbar = tqdm(total=len(train_loader))
     pbar.set_description("%s mode with negative samples %d ..." % (mode, neg_samples))
-
     get_root_nodes(subgraphs, args, mode)
 
     loss_lst = []
@@ -266,6 +265,11 @@ def link_pred_train(model, args, g, df, node_feats, edge_feats):
     patience = 5  # 允许验证集性能未提升的最大连续轮数
     counter = 0  # 记录验证集性能未提升的连续轮数
 
+    # 【新增 1】用于记录总耗时和实际执行的 epoch 数量
+    total_train_time = 0.0
+    total_valid_time = 0.0
+    actual_run_epochs = 0
+
     if args.predict_class:
         num_classes = args.num_edgeType + 1
         train_AUROC = MulticlassAUROC(num_classes, average="macro", thresholds=None)
@@ -309,6 +313,10 @@ def link_pred_train(model, args, g, df, node_feats, edge_feats):
                 valid_AUPRC,
                 mode="valid",
             )
+        # 【新增 2】累加耗时并更新实际运行轮数
+        total_train_time += time_train
+        total_valid_time += time_valid
+        actual_run_epochs += 1
 
         if valid_loss < low_loss:
             best_auc_model = copy.deepcopy(model).cpu()
@@ -337,7 +345,13 @@ def link_pred_train(model, args, g, df, node_feats, edge_feats):
         all_results["valid_loss"].append(valid_loss)
 
     logging.info(f"best epoch {best_epoch}, auc score {best_auc}")
-    return best_auc_model
+    # 【新增 3】计算单轮平均耗时
+    avg_train_time = total_train_time / actual_run_epochs
+    avg_valid_time = total_valid_time / actual_run_epochs
+    logging.info(f"best epoch {best_epoch}, auc score {best_auc}")
+    logging.info(f"Avg Train Time per epoch: {avg_train_time:.4f} s")
+    logging.info(f"Avg Valid(Prediction) Time per epoch: {avg_valid_time:.4f} s")
+    return best_auc_model, avg_train_time, avg_valid_time
 
 
 def compute_sign_feats(node_feats, df, start_i, num_links, root_nodes, args):
@@ -587,9 +601,17 @@ def get_root_nodes(subgraphs, args, split_mode):
     )
 
     def cal_his_degree(node, node_time):
-        his_df = df_edges[(df_edges["timestamp"] < node_time)]
-        his_head = his_df[his_df["head"] == node]
-        his_tail = his_df[his_df["tail"] == node]
+        # 修复了之前的代码中由于列名不一致导致的错误，现在根据是否存在 "timestamp" 列来正确地计算历史度数。
+        if "timestamp" in df_edges.columns:
+            his_df = df_edges[(df_edges["timestamp"] < node_time)]
+            his_head = his_df[his_df["head"] == node]
+            his_tail = his_df[his_df["tail"] == node]
+
+        else:
+            his_df = df_edges[(df_edges["ts"] < node_time)]
+            his_head = his_df[his_df["src"] == node]
+            his_tail = his_df[his_df["dst"] == node]
+
         return len(his_head) + len(his_tail)
 
     nodes = []

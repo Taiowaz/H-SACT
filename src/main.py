@@ -89,8 +89,20 @@ def main(args):
                 model = torch.nn.DataParallel(model)
             model = model.to(args.device)
             # logging.info(f"模型结构: {model}")
+            # 【新增 1】计算模型的可训练参数量 (#Params)
+            total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+            logging.info(f">>> 模型参数量 (#Params): {total_params:,} <<<")
+
+            # 【新增 2】在训练正式开始前，重置 GPU 峰值显存统计
+            if args.use_gpu and torch.cuda.is_available():
+                torch.cuda.reset_peak_memory_stats(args.device)
+
             model.train()
-            model = link_pred_train(
+            # model = link_pred_train(
+            #     model.to(args.device), args, g, df, node_feats, edge_feats
+            # )
+            # 【修改 3】接收 train_test.py 传回的平均时间
+            model, avg_train_time, avg_valid_time = link_pred_train(
                 model.to(args.device), args, g, df, node_feats, edge_feats
             )
 
@@ -155,6 +167,26 @@ def main(args):
         test_time = timeit.default_timer() - start_test
         logging.info(f"\tTest: Elapsed Time (s): {test_time: .4f}")
 
+        # 【新增 4】获取整个训练和验证期间的 GPU 显存占用峰值
+        peak_gpu_mem_mb = 0.0
+        if torch.cuda.is_available():
+            peak_gpu_mem_mb = torch.cuda.max_memory_allocated(args.device) / (1024**2)
+        logging.info(f">>> GPU显存峰值消耗: {peak_gpu_mem_mb:.2f} MB <<<")
+
+        # save_results(
+        #     {
+        #         "model": args.model,
+        #         "data": args.dataset,
+        #         "run": run_idx,
+        #         "seed": args.seed,
+        #         f"test {metric}": f"{perf_mrr_test_mean: .4f} +- {perf_mrr_test_std: .4f}",
+        #         "test auroc": f"{auroc_test: .4f}",
+        #         "test auprc": f"{auprc_test: .4f}",
+        #         "test_time": test_time,
+        #     },
+        #     result_filename,
+        # )
+        # 【修改 5】将提取出的 4 个核心指标汇总保存进 results_filename
         save_results(
             {
                 "model": args.model,
@@ -164,7 +196,13 @@ def main(args):
                 f"test {metric}": f"{perf_mrr_test_mean: .4f} +- {perf_mrr_test_std: .4f}",
                 "test auroc": f"{auroc_test: .4f}",
                 "test auprc": f"{auprc_test: .4f}",
-                "test_time": test_time,
+                # ----------------- 论文核心指标 -----------------
+                "Params": total_params,  # 1. 空间复杂度: 模型参数量
+                "Train_Time_per_epoch": avg_train_time,  # 2. 计算开销: 单轮平均训练时间
+                "Prediction_Time_per_epoch": avg_valid_time,  # 3. 推理速度: 单轮平均推理时间
+                "GPU_Memory_MB": peak_gpu_mem_mb,  # 4. 空间开销: GPU显存峰值消耗
+                # ------------------------------------------------
+                "Total_Test_Time": test_time,  # 附加：测试集整体测试时长
             },
             result_filename,
         )

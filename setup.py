@@ -25,7 +25,7 @@ with open("README.md", "r", encoding="utf-8") as f:
 # --- 主设置函数 ---
 setup(
     # 1. 项目元数据
-    name="geosthn",  # 建议使用一个能代表你整个项目的名字
+    name="hsact",  # 建议使用一个能代表你整个项目的名字
     version="0.1.0",     # 项目版本号
     author="Albin",  # 你的名字或团队名 (替换 XXXX-2)
     author_email="taiowaz@gmail.com", # 你的邮箱 (替换 XXXX-3)
