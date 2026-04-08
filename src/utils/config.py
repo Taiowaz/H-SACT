@@ -30,6 +30,7 @@ def get_args(args=None):
     parser.add_argument("--num_edgeType", type=int, default=0, help="num of edgeType")
     parser.add_argument("--lr", type=float, default=0.0005)
     parser.add_argument("--weight_decay", type=float, default=1e-4)
+    # 
     parser.add_argument("--predict_class", action="store_true")
 
     # model

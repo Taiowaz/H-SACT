@@ -111,13 +111,21 @@ def get_inputs_for_ind(
         has_temporal_neighbors.append(num_edges > 0)
 
     if not args.predict_class:
-        inputs = [
-            subgraph_edge_feats.to(args.device),
-            subgraph_edts.to(args.device),
-            len(has_temporal_neighbors),
-            torch.tensor(all_inds).long(),
-            torch.from_numpy(elabel[ind]).to(args.device),
-        ]
+        if args.model =="hetero_sthn":
+            inputs = [
+                subgraph_edge_feats.to(args.device),
+                subgraph_edts.to(args.device),
+                len(has_temporal_neighbors),
+                torch.tensor(all_inds).long(),
+                torch.from_numpy(elabel[ind]).to(args.device),
+            ]
+        elif args.model == "sthn":
+            inputs = [
+                subgraph_edge_feats.to(args.device),
+                subgraph_edts.to(args.device),
+                len(has_temporal_neighbors),
+                torch.tensor(all_inds).long(),
+            ]
     else:
         subgraph_edge_type = elabel[ind]
         inputs = [
@@ -194,9 +202,10 @@ def run(
             loss, pred, edge_label, h_batch = model(
                 inputs, neg_samples, subgraph_node_feats, structual_data
             )
+            hs.append(h_batch.detach().cpu().numpy())
+            np.savez(f"{args.output_dir}/{args.dataset}_{mode}_hs.npz", hs=np.array(hs))
         else:
             loss, pred, edge_label = model(inputs, neg_samples, subgraph_node_feats)
-        hs.append(h_batch.detach().cpu().numpy())
         if mode == "train" and optimizer != None:
             optimizer.zero_grad()
             if isinstance(loss, torch.Tensor) and loss.dim() > 0:
@@ -214,7 +223,7 @@ def run(
 
         pbar.update(1)
 
-    np.savez(f"{args.output_dir}/{args.dataset}_{mode}_hs.npz", hs=np.array(hs))
+    
     pbar.close()
     total_auroc = MLAUROC.compute()
     total_auprc = MLAUPRC.compute()
@@ -507,12 +516,12 @@ def test(split_mode, model, args, metric, neg_sampler, g, df, node_feats, edge_f
                 ind,
                 args,
             )
-
+            
             raw_temporal.append(inputs[1].cpu().numpy())
-            raw_structural.append(structual_data.x.cpu().numpy())
 
             # Forward pass
             if args.use_riemannian_structure:
+                raw_structural.append(structual_data.x.cpu().numpy())
                 loss, pred, edge_label, h_batch = model(
                     inputs, neg_samples, subgraph_node_feats, structual_data
                 )

@@ -737,6 +737,7 @@ class STHN_Interface(nn.Module):
         self.edge_predictor.reset_parameters()
 
     def forward(self, model_inputs, neg_samples, node_feats):
+        print("len(model_inputs): ", len(model_inputs))
         pred_pos, pred_neg = self.predict(model_inputs, neg_samples, node_feats)
         all_pred_logits = torch.cat((pred_pos, pred_neg), dim=0)
         all_edge_label = torch.cat(
@@ -753,6 +754,7 @@ class STHN_Interface(nn.Module):
         if self.time_feats_dim > 0 and self.node_feats_dim == 0:
             x = self.base_model(*model_inputs)
         elif self.time_feats_dim > 0 and self.node_feats_dim > 0:
+            print("len(model_inputs): ", len(model_inputs))
             x = self.base_model(*model_inputs)
             x = torch.cat([x, node_feats], dim=1)
         elif self.time_feats_dim == 0 and self.node_feats_dim > 0:
