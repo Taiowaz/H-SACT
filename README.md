@@ -1,4 +1,5 @@
 ## 环境搭建
+chmod +x env.sh
 运行脚本：./env.sh
 ## 数据集构建
 tgb/datasets/thgl_{数据集名}_subset下，依次运行get\_{数据集}_subset.ipynb以及thgl\_{数据集}_subset_ns_gen.py
