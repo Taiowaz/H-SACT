@@ -22,3 +22,9 @@ LLM_CDHG.egg-info
 
 # Python files
 __pycache__/
+
+*.png
+*.pkl
+
+*.npz
+*.csv

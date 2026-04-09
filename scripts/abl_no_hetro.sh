@@ -21,7 +21,7 @@ common_args="
 #     --dataset ${dataset} \
 #     $common_args \
 #     --use_gpu 1 \
-#     --device 1 > run_log/run_${dataset}_abl.log 2>&1 &
+#     --device 0 > run_log/run_${dataset}_abl.log 2>&1 &
 # echo $! > run_log/run_${dataset}_abl.pid
 
 dataset="thgl-github-subset"

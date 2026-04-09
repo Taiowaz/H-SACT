@@ -2,6 +2,8 @@ from ast import arg
 import numpy as np
 import logging
 
+from src.model.sthn import HeteroSTHN_Interface_rgfm_loss
+
 
 def load_model(args):
     # get model
@@ -42,6 +44,10 @@ def load_model(args):
                 "dropout": args.rgfm_dropout,
                 "bias": True,
                 "activation": None,
+                # # 🆕 NEW: 添加几何空间控制参数，默认为 True 以保持向后兼容
+                # "use_euclidean": True if args.use_euclidean==1 else False,
+                # "use_hyperbolic": True if args.use_hyperbolic==1 else False,
+                # "use_spherical": True if args.use_spherical==1 else False,
             }
             model = STHN_Interface_rgfm(
                 mlp_mixer_configs=mixer_configs,
@@ -96,13 +102,29 @@ def load_model(args):
                 "dropout": args.rgfm_dropout,
                 "bias": True,
                 "activation": None,
+                # # 🆕 NEW: 添加几何空间控制参数，默认为 True 以保持向后兼容
+                # "use_euclidean": True if args.use_euclidean==1 else False,
+                # "use_hyperbolic": True if args.use_hyperbolic==1 else False,
+                # "use_spherical": True if args.use_spherical==1 else False,
             }
-            model = HeteroSTHN_Interface_rgfm(
-                mlp_mixer_configs=mixer_configs,
-                edge_predictor_configs=edge_predictor_configs,
-                edge_types=args.edge_types,  # 🆕 NEW: 传递边类型
-                riemannian_configs=riemannian_configs,  # 🆕 NEW: 传递黎曼结构配置
-            )
+            if args.use_ali_loss == 1:
+                from src.model.sthn import (
+                    HeteroSTHN_Interface_rgfm_loss as HeteroSTHN_Interface_rgfm,
+                )
+
+                model = HeteroSTHN_Interface_rgfm_loss(
+                    mlp_mixer_configs=mixer_configs,
+                    edge_predictor_configs=edge_predictor_configs,
+                    edge_types=args.edge_types,  # 🆕 NEW: 传递边类型
+                    riemannian_configs=riemannian_configs,  # 🆕 NEW: 传递黎曼结构配置
+                )
+            else:
+                model = HeteroSTHN_Interface_rgfm(
+                    mlp_mixer_configs=mixer_configs,
+                    edge_predictor_configs=edge_predictor_configs,
+                    edge_types=args.edge_types,  # 🆕 NEW: 传递边类型
+                    riemannian_configs=riemannian_configs,  # 🆕 NEW: 传递黎曼结构配置
+                )
         else:
             # 🆕 NEW: 创建异构STHN模型（接口与原有模型几乎相同）
             model = HeteroSTHN_Interface(
@@ -116,10 +138,10 @@ def load_model(args):
     else:
         raise NotImplementedError(f"Model {args.model} not implemented")
 
-    for k, v in model.named_parameters():
-        logging.info(f"{k}: {v.requires_grad}")
+    # for k, v in model.named_parameters():
+    #     logging.info(f"{k}: {v.requires_grad}")
 
-    logging_model_info(model)
+    # logging_model_info(model)
 
     return model, args, link_pred_train
 

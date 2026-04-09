@@ -90,7 +90,6 @@ class SphericalStructureLearner(nn.Module):
 
     def forward(self, x_H, x_S, data):
         """
-
         :param x_H: Hyperbolic representation of nodes
         :param x_S: Sphere representation of nodes
         :param data: a graph or mini-batched graph

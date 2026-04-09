@@ -1,4 +1,5 @@
 import os
+import pandas as pd
 import torch
 import numpy as np
 import logging
@@ -9,9 +10,13 @@ from torch_sparse import SparseTensor
 from torchmetrics.classification import MulticlassAUROC, MulticlassAveragePrecision
 from torchmetrics.classification import BinaryAUROC, BinaryAveragePrecision
 from sklearn.preprocessing import MinMaxScaler
-from src.utils.utils import evaluate_mrr
-from tgb.linkproppred.evaluate import Evaluator
+from src.utils.utils import evaluate_mrr, row_norm
 from scipy.sparse.linalg import ArpackError
+import networkx as nx
+from torch_geometric.data import Data, Batch
+from torch_geometric.utils import to_networkx, get_laplacian
+from scipy.sparse import csr_matrix
+from scipy.sparse.linalg import eigs
 
 from src.utils.construct_subgraph import (
     get_random_inds,
@@ -20,7 +25,6 @@ from src.utils.construct_subgraph import (
     get_subgraph_sampler,
     pre_compute_subgraphs,
 )
-from src.utils.utils import row_norm
 
 
 def get_inputs_for_ind(
@@ -107,13 +111,21 @@ def get_inputs_for_ind(
         has_temporal_neighbors.append(num_edges > 0)
 
     if not args.predict_class:
-        inputs = [
-            subgraph_edge_feats.to(args.device),
-            subgraph_edts.to(args.device),
-            len(has_temporal_neighbors),
-            torch.tensor(all_inds).long(),
-            torch.from_numpy(elabel[ind]).to(args.device),
-        ]
+        if args.model =="hetero_sthn":
+            inputs = [
+                subgraph_edge_feats.to(args.device),
+                subgraph_edts.to(args.device),
+                len(has_temporal_neighbors),
+                torch.tensor(all_inds).long(),
+                torch.from_numpy(elabel[ind]).to(args.device),
+            ]
+        elif args.model == "sthn":
+            inputs = [
+                subgraph_edge_feats.to(args.device),
+                subgraph_edts.to(args.device),
+                len(has_temporal_neighbors),
+                torch.tensor(all_inds).long(),
+            ]
     else:
         subgraph_edge_type = elabel[ind]
         inputs = [
@@ -139,8 +151,6 @@ def run(
     mode,
 ):
     time_epoch = 0
-    ###################################################
-    # setup modes
     cur_inds = 0
     if mode == "train":
         model.train()
@@ -155,7 +165,6 @@ def run(
         cached_neg_samples = 1
 
     elif mode == "test":
-        ## Erfan: remove this part use TGB evaluation
         raise ("Use TGB evaluation")
         # model.eval()
         # cur_df = df[args.test_mask]
@@ -166,15 +175,14 @@ def run(
     train_loader = cur_df.groupby(cur_df.index // args.batch_size)
     pbar = tqdm(total=len(train_loader))
     pbar.set_description("%s mode with negative samples %d ..." % (mode, neg_samples))
+    get_root_nodes(subgraphs, args, mode)
 
-    ###################################################
-    # compute + training + fetch all scores
     loss_lst = []
     MLAUROC.reset()
     MLAUPRC.reset()
 
+    hs = []
     for ind in range(len(train_loader)):
-        ###################################################
         inputs, subgraph_node_feats, cur_inds, structual_data = get_inputs_for_ind(
             subgraphs,
             mode,
@@ -191,9 +199,11 @@ def run(
 
         start_time = time.time()
         if args.use_riemannian_structure:
-            loss, pred, edge_label = model(
+            loss, pred, edge_label, h_batch = model(
                 inputs, neg_samples, subgraph_node_feats, structual_data
             )
+            hs.append(h_batch.detach().cpu().numpy())
+            np.savez(f"{args.output_dir}/{args.dataset}_{mode}_hs.npz", hs=np.array(hs))
         else:
             loss, pred, edge_label = model(inputs, neg_samples, subgraph_node_feats)
         if mode == "train" and optimizer != None:
@@ -212,6 +222,8 @@ def run(
             loss_lst.append(float(loss))
 
         pbar.update(1)
+
+    
     pbar.close()
     total_auroc = MLAUROC.compute()
     total_auprc = MLAUPRC.compute()
@@ -257,8 +269,13 @@ def link_pred_train(model, args, g, df, node_feats, edge_feats):
     user_train_total_time = 0
     user_epoch_num = 0
     # 定义早停机制的参数
-    patience = 10  # 允许验证集性能未提升的最大连续轮数
+    patience = 5  # 允许验证集性能未提升的最大连续轮数
     counter = 0  # 记录验证集性能未提升的连续轮数
+
+    # 【新增 1】用于记录总耗时和实际执行的 epoch 数量
+    total_train_time = 0.0
+    total_valid_time = 0.0
+    actual_run_epochs = 0
 
     if args.predict_class:
         num_classes = args.num_edgeType + 1
@@ -303,6 +320,10 @@ def link_pred_train(model, args, g, df, node_feats, edge_feats):
                 valid_AUPRC,
                 mode="valid",
             )
+        # 【新增 2】累加耗时并更新实际运行轮数
+        total_train_time += time_train
+        total_valid_time += time_valid
+        actual_run_epochs += 1
 
         if valid_loss < low_loss:
             best_auc_model = copy.deepcopy(model).cpu()
@@ -331,7 +352,13 @@ def link_pred_train(model, args, g, df, node_feats, edge_feats):
         all_results["valid_loss"].append(valid_loss)
 
     logging.info(f"best epoch {best_epoch}, auc score {best_auc}")
-    return best_auc_model
+    # 【新增 3】计算单轮平均耗时
+    avg_train_time = total_train_time / actual_run_epochs
+    avg_valid_time = total_valid_time / actual_run_epochs
+    logging.info(f"best epoch {best_epoch}, auc score {best_auc}")
+    logging.info(f"Avg Train Time per epoch: {avg_train_time:.4f} s")
+    logging.info(f"Avg Valid(Prediction) Time per epoch: {avg_valid_time:.4f} s")
+    return best_auc_model, avg_train_time, avg_valid_time
 
 
 def compute_sign_feats(node_feats, df, start_i, num_links, root_nodes, args):
@@ -407,11 +434,6 @@ def compute_sign_feats(node_feats, df, start_i, num_links, root_nodes, args):
             # 将 SIGN 特征列表中的所有张量在第 0 维堆叠后求和
             sign_feats = torch.sum(torch.stack(sign_feats), dim=0)
 
-        # 将计算得到的 SIGN 特征赋值给对应的根节点
-        # print("_root_ind device:", _root_ind.device)
-        # print("sign_feats device:", sign_feats.device)
-        # print("output_feats device:", output_feats.device)
-        # print("_root_ind device:", _root_ind.device)
         output_feats[_root_ind] = sign_feats[root_nodes[_root_ind]]
 
         # 更新当前处理的边信息的索引
@@ -435,6 +457,7 @@ def test(split_mode, model, args, metric, neg_sampler, g, df, node_feats, edge_f
         negative_sampler=neg_sampler,
         split_mode=split_mode,
     )
+    get_root_nodes(test_subgraphs, args, "test")
 
     # Get current dataframe based on split mode
     if split_mode == "test":
@@ -467,15 +490,17 @@ def test(split_mode, model, args, metric, neg_sampler, g, df, node_feats, edge_f
     else:
         auc_metric = BinaryAUROC(thresholds=None)
         ap_metric = BinaryAveragePrecision(thresholds=None)
-    
-    
+
     auc_metric.reset()
     ap_metric.reset()
-    
+
     logging.info(f"Starting prediction for {split_mode} set...")
     all_aucs = []
     all_aps = []
     with torch.no_grad():
+        hs = []
+        raw_temporal = []
+        raw_structural = []
         for ind in range(len(test_loader)):
             # Get inputs for current batch
             inputs, subgraph_node_feats, cur_inds, structual_data = get_inputs_for_ind(
@@ -491,28 +516,32 @@ def test(split_mode, model, args, metric, neg_sampler, g, df, node_feats, edge_f
                 ind,
                 args,
             )
+            
+            raw_temporal.append(inputs[1].cpu().numpy())
 
             # Forward pass
             if args.use_riemannian_structure:
-                loss, pred, edge_label = model(
+                raw_structural.append(structual_data.x.cpu().numpy())
+                loss, pred, edge_label, h_batch = model(
                     inputs, neg_samples, subgraph_node_feats, structual_data
                 )
             else:
                 loss, pred, edge_label = model(inputs, neg_samples, subgraph_node_feats)
+            print("pred.shape: ", pred.shape)
             split = len(pred) // 2
-
+            hs.append(h_batch.detach().cpu().numpy())
             # mrr指标计算
             perf_list.append(evaluate_mrr(pred, neg_samples))
             pbar.update(1)
-            
+
             # 计算AUC和AP
             num_src = len(edge_label) // (neg_samples + 1)
             for i in range(num_src):
                 pred_batch_item = []
                 label_batch_item = []
                 for j in range(neg_samples + 1):
-                    pred_batch_item.append(pred[i + j* num_src])
-                    label_batch_item.append(edge_label[i + j* num_src])
+                    pred_batch_item.append(pred[i + j * num_src])
+                    label_batch_item.append(edge_label[i + j * num_src])
                 pred_batch_item = torch.stack(pred_batch_item)
                 label_batch_item = torch.stack(label_batch_item)
                 auc = auc_metric(pred_batch_item, label_batch_item.long())
@@ -529,7 +558,18 @@ def test(split_mode, model, args, metric, neg_sampler, g, df, node_feats, edge_f
             # Log progress
             if ind % 100 == 0:
                 logging.info(f"Processed {ind} batches...")
-
+        hs = np.array(hs)
+        np.savez(f"{args.output_dir}/{args.dataset}_test_hs.npz", hs=hs)
+        raw_temporal = np.array(raw_temporal)
+        np.savez(
+            f"{args.output_dir}/{args.dataset}_test_raw_temporal_feats.npz",
+            raw_temporal=raw_temporal,
+        )
+        raw_structural = np.array(raw_structural)
+        np.savez(
+            f"{args.output_dir}/{args.dataset}_test_raw_structural_feats.npz",
+            raw_structural=raw_structural,
+        )
     pbar.close()
     logging.info(f"Completed prediction for {split_mode} set.")
 
@@ -542,27 +582,19 @@ def test(split_mode, model, args, metric, neg_sampler, g, df, node_feats, edge_f
     # auc and ap
     auc = float(np.mean(all_aucs))
     auc_std = float(np.std(all_aucs))
-    logging.info(
-        f"{split_mode} results - auc: {auc:.4f} ± {auc_std:.4f}"
-    )
-    
+    logging.info(f"{split_mode} results - auc: {auc:.4f} ± {auc_std:.4f}")
+
     ap = float(np.mean(all_aps))
     ap_std = float(np.std(all_aps))
-    logging.info(
-        f"{split_mode} results - ap: {ap:.4f} ± {ap_std:.4f}"
-    )
+    logging.info(f"{split_mode} results - ap: {ap:.4f} ± {ap_std:.4f}")
 
     all_preds = torch.stack(all_preds).cpu()
     all_labels = torch.stack(all_labels).cpu()
-    save_path = os.path.join(args.output_dir, f'{args.dataset}_{split_mode}_preds.npz')
-    np.savez(
-        save_path,
-        preds=all_preds.numpy(),
-        labels=all_labels.numpy()
-    )
+    save_path = os.path.join(args.output_dir, f"{args.dataset}_{split_mode}_preds.npz")
+    np.savez(save_path, preds=all_preds.numpy(), labels=all_labels.numpy())
 
-    logging.info(f"Saved predictions and labels to {save_path}")   
-    
+    logging.info(f"Saved predictions and labels to {save_path}")
+
     # Clear memory
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
@@ -570,15 +602,56 @@ def test(split_mode, model, args, metric, neg_sampler, g, df, node_feats, edge_f
     return (perf_metrics_mean, perf_metrics_std, perf_list, auc, ap)
 
 
-import torch
-import networkx as nx
-import numpy as np
-from torch_geometric.data import Data, Batch
-from torch_geometric.utils import to_networkx, from_networkx, get_laplacian
-from scipy.sparse import csr_matrix
-from scipy.sparse.linalg import eigs
+def get_root_nodes(subgraphs, args, split_mode):
+    subgraph_data = subgraphs[0]
+    df_edges = pd.read_csv(
+        f"tgb/DATA/{args.dataset.replace('-','_')}/{args.dataset}_edgelist.csv"
+    )
 
-# 在您的 train_test.py 文件中
+    def cal_his_degree(node, node_time):
+        # 修复了之前的代码中由于列名不一致导致的错误，现在根据是否存在 "timestamp" 列来正确地计算历史度数。
+        if "timestamp" in df_edges.columns:
+            his_df = df_edges[(df_edges["timestamp"] < node_time)]
+            his_head = his_df[his_df["head"] == node]
+            his_tail = his_df[his_df["tail"] == node]
+
+        else:
+            his_df = df_edges[(df_edges["ts"] < node_time)]
+            his_head = his_df[his_df["src"] == node]
+            his_tail = his_df[his_df["dst"] == node]
+
+        return len(his_head) + len(his_tail)
+
+    nodes = []
+    degrees = []
+    for subgra in subgraph_data:
+        # print("len(subgra): ", len(subgra))
+        nodes_dst_batch = []
+        nodes_src_batch = []
+        degrees_src_batch = []
+        degrees_dst_batch = []
+        for sub in subgra[: args.batch_size]:
+            nodes_src_batch.append(sub["root_node"])
+            node_t = sub["root_time"]
+            his_deg = cal_his_degree(sub["root_node"], node_t)
+            degrees_src_batch.append(his_deg)
+        for sub in subgra[args.batch_size : 2 * args.batch_size]:
+            nodes_dst_batch.append(sub["root_node"])
+            node_t = sub["root_time"]
+            his_deg = cal_his_degree(sub["root_node"], node_t)
+            degrees_dst_batch.append(his_deg)
+        nodes.append([nodes_src_batch, nodes_dst_batch])
+        degrees.append([degrees_src_batch, degrees_dst_batch])
+    nodes = np.array(nodes)
+    np.savez(
+        os.path.join(args.output_dir, f"{args.dataset}_{split_mode}_nodes.npz"),
+        nodes=nodes,
+    )
+    degrees = np.array(degrees)
+    np.savez(
+        os.path.join(args.output_dir, f"{args.dataset}_{split_mode}_degrees.npz"),
+        degrees=degrees,
+    )
 
 
 def get_eigen_tokens_tensor(edge_index, num_nodes, embed_dim, device):
@@ -758,11 +831,6 @@ def get_eigen_tokens_tensor(edge_index, num_nodes, embed_dim, device):
             continue
 
         try:
-            print(
-                f"Trying strategy {i+1}/{len(strategies)}: k={actual_k}, ncv={ncv}, maxiter={maxiter}, which={which}, tol={tol}"
-            )
-
-            # 尝试计算特征值和特征向量
             eigenvals, eigvecs_raw = eigs(
                 L, k=actual_k, which=which, ncv=ncv, maxiter=maxiter, tol=tol
             )
@@ -772,29 +840,19 @@ def get_eigen_tokens_tensor(edge_index, num_nodes, embed_dim, device):
 
             # 验证结果的有效性
             if torch.isnan(eigvecs).any() or torch.isinf(eigvecs).any():
-                print(
-                    f"Warning: Invalid eigenvectors detected in strategy {i+1}, trying next strategy..."
-                )
                 eigvecs = None
                 continue
-
-            print(f"Strategy {i+1} succeeded with k={actual_k} eigenvectors!")
             break
 
         except (ArpackError, np.linalg.LinAlgError, ValueError) as e:
-            print(f"Strategy {i+1} failed: {str(e)}")
             eigvecs = None
             continue
         except Exception as e:
-            print(f"Strategy {i+1} failed with unexpected error: {str(e)}")
             eigvecs = None
             continue
 
     # 如果所有ARPACK策略都失败了，尝试备选的数值方法
     if eigvecs is None:
-        print(
-            f"All ARPACK strategies failed for graph of size {num_nodes}. Trying alternative numerical methods..."
-        )
 
         # 备选方案1：使用scipy的其他特征值求解器
         alternative_methods = [
@@ -810,7 +868,7 @@ def get_eigen_tokens_tensor(edge_index, num_nodes, embed_dim, device):
 
             try:
                 if method_info["method"] == "dense_eigh":
-                    print("Trying dense eigenvalue decomposition...")
+                    # print("Trying dense eigenvalue decomposition...")
                     L_dense = L.toarray()
                     eigenvals, eigvecs_raw = np.linalg.eigh(L_dense)
                     # 取前k个最小的特征值对应的特征向量
@@ -818,11 +876,11 @@ def get_eigen_tokens_tensor(edge_index, num_nodes, embed_dim, device):
                     eigvecs = (
                         torch.from_numpy(eigvecs_raw[:, :k_actual]).float().to(device)
                     )
-                    print(f"Dense method succeeded with {k_actual} eigenvectors!")
+                    # print(f"Dense method succeeded with {k_actual} eigenvectors!")
                     break
 
                 elif method_info["method"] == "lobpcg":
-                    print("Trying LOBPCG method...")
+                    # print("Trying LOBPCG method...")
                     from scipy.sparse.linalg import lobpcg
 
                     k_actual = min(k, num_nodes // 4)
@@ -833,18 +891,18 @@ def get_eigen_tokens_tensor(edge_index, num_nodes, embed_dim, device):
                             L, X, largest=False, maxiter=maxiter
                         )
                         eigvecs = torch.from_numpy(eigvecs_raw).float().to(device)
-                        print(f"LOBPCG method succeeded with {k_actual} eigenvectors!")
+                        # print(f"LOBPCG method succeeded with {k_actual} eigenvectors!")
                         break
 
             except Exception as e:
-                print(f"Alternative method {method_info['method']} failed: {str(e)}")
+                # print(f"Alternative method {method_info['method']} failed: {str(e)}")
                 continue
 
     # 如果数值方法也失败了，使用图结构的备选方案
     if eigvecs is None:
-        print(
-            "All numerical methods failed. Using graph-structure-based alternatives..."
-        )
+        # print(
+        #     "All numerical methods failed. Using graph-structure-based alternatives..."
+        # )
 
         structure_methods = [
             "degree_based",
@@ -857,7 +915,7 @@ def get_eigen_tokens_tensor(edge_index, num_nodes, embed_dim, device):
         for method in structure_methods:
             try:
                 if method == "degree_based":
-                    print("Using degree-based encoding...")
+                    # print("Using degree-based encoding...")
                     # 基于节点度数的编码
                     degrees = np.array(L.sum(axis=1)).flatten()
                     degree_matrix = np.zeros((num_nodes, min(embed_dim, num_nodes)))
@@ -870,7 +928,7 @@ def get_eigen_tokens_tensor(edge_index, num_nodes, embed_dim, device):
                     eigvecs = torch.from_numpy(degree_matrix).float().to(device)
 
                 elif method == "random_walk_based":
-                    print("Using random walk based encoding...")
+                    # print("Using random walk based encoding...")
                     # 基于随机游走的编码
                     P = L.copy()
                     P.data = 1.0 / (P.data + 1e-8)  # 转换为转移概率矩阵
@@ -891,7 +949,7 @@ def get_eigen_tokens_tensor(edge_index, num_nodes, embed_dim, device):
                     )
 
                 elif method == "positional_encoding":
-                    print("Using positional encoding...")
+                    # print("Using positional encoding...")
                     # 位置编码
                     pos_encoding = torch.zeros(num_nodes, embed_dim, device=device)
                     for i in range(embed_dim):
@@ -907,7 +965,7 @@ def get_eigen_tokens_tensor(edge_index, num_nodes, embed_dim, device):
                     eigvecs = pos_encoding
 
                 elif method == "node_id_embedding":
-                    print("Using node ID embedding...")
+                    # print("Using node ID embedding...")
                     # 节点ID嵌入
                     node_embedding = torch.zeros(num_nodes, embed_dim, device=device)
                     for i in range(num_nodes):
@@ -915,20 +973,20 @@ def get_eigen_tokens_tensor(edge_index, num_nodes, embed_dim, device):
                     eigvecs = node_embedding
 
                 else:  # random_initialization
-                    print("Using random initialization...")
+                    # print("Using random initialization...")
                     eigvecs = torch.randn(num_nodes, embed_dim, device=device) * 0.1
 
                 if eigvecs is not None:
-                    print(f"Successfully generated embeddings using {method}")
+                    # print(f"Successfully generated embeddings using {method}")
                     break
 
             except Exception as e:
-                print(f"Structure method {method} failed: {str(e)}")
+                # print(f"Structure method {method} failed: {str(e)}")
                 continue
 
     # 最终的安全网：如果一切都失败了
     if eigvecs is None:
-        print("All methods failed. Using final fallback...")
+        # print("All methods failed. Using final fallback...")
         eigvecs = torch.eye(num_nodes, device=device)[:, : min(embed_dim, num_nodes)]
         if eigvecs.shape[1] < embed_dim:
             padding = torch.zeros(
@@ -952,9 +1010,9 @@ def get_eigen_tokens_tensor(edge_index, num_nodes, embed_dim, device):
 
     # 最终的健全性检查和归一化
     if eigvecs.shape != (num_nodes, embed_dim):
-        print(
-            f"Warning: eigvecs shape {eigvecs.shape} doesn't match expected {(num_nodes, embed_dim)}"
-        )
+        # print(
+        #     f"Warning: eigvecs shape {eigvecs.shape} doesn't match expected {(num_nodes, embed_dim)}"
+        # )
         eigvecs = torch.randn(num_nodes, embed_dim, device=device) * 0.1
 
     # 添加归一化以提高数值稳定性
@@ -1092,6 +1150,3 @@ def create_riemannian_data_snapshot(
 
 
     return snapshot_data.to(device)
-
-
-
