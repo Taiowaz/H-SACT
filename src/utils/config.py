@@ -44,6 +44,23 @@ def get_args(args=None):
     parser.add_argument("--time_dims", type=int, default=100)
     parser.add_argument("--hidden_dims", type=int, default=100)
     parser.add_argument("--num_layers", type=int, default=1)
+
+    # ===== Curvature ablation: Fixed vs Learnable =====
+    # 0: fixed curvature (default, keep backward-compatible)
+    # 1: learnable curvature
+    parser.add_argument("--learnable_curvature", type=int, default=0)
+
+    # initialization for hyperbolic/spherical curvature magnitude
+    # actual hyperbolic sign handled in manifold module
+    parser.add_argument("--k_h_init", type=float, default=1.0)
+    parser.add_argument("--k_s_init", type=float, default=1.0)
+
+    # optional optimization control for curvature parameters
+    parser.add_argument("--curvature_lr_scale", type=float, default=0.1)
+    parser.add_argument("--curvature_clip_min", type=float, default=1e-3)
+    parser.add_argument("--curvature_clip_max", type=float, default=1e3)
+    # ===== End curvature ablation args =====
+
     parser.add_argument("--check_data_leakage", action="store_true")
 
     parser.add_argument("--ignore_node_feats", action="store_true")

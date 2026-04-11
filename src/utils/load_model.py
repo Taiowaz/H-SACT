@@ -1,4 +1,3 @@
-from ast import arg
 import numpy as np
 import logging
 
@@ -8,13 +7,13 @@ from src.model.sthn import HeteroSTHN_Interface_rgfm_loss
 def load_model(args):
     # get model
     edge_predictor_configs = {
-        "dim_in_time": args.time_dims,  # 100
-        "dim_in_node": args.node_feat_dims,  # 0
-        "predict_class": 1 if not args.predict_class else args.num_edgeType + 1,  # 1
+        "dim_in_time": args.time_dims,
+        "dim_in_node": args.node_feat_dims,
+        "predict_class": 1 if not args.predict_class else args.num_edgeType + 1,
     }
 
     if args.model == "sthn":
-        # 原始STHN模型 - 保持不变
+        # 原始STHN模型
         if args.predict_class:
             from src.model.sthn import Multiclass_Interface as STHN_Interface
         else:
@@ -22,17 +21,18 @@ def load_model(args):
         from src.train_test import link_pred_train
 
         mixer_configs = {
-            "per_graph_size": args.max_edges,  # 50
-            "time_channels": args.time_dims,  # 100
-            "input_channels": args.edge_feat_dims,  # 14
-            "hidden_channels": args.hidden_dims,  # 100
-            "out_channels": args.hidden_dims,  # 100
-            "num_layers": args.num_layers,  # 1
-            "dropout": args.dropout,  # 0.1
-            "channel_expansion_factor": args.channel_expansion_factor,  # 2
-            "window_size": args.window_size,  # 5
-            "use_single_layer": False,  # False
+            "per_graph_size": args.max_edges,
+            "time_channels": args.time_dims,
+            "input_channels": args.edge_feat_dims,
+            "hidden_channels": args.hidden_dims,
+            "out_channels": args.hidden_dims,
+            "num_layers": args.num_layers,
+            "dropout": args.dropout,
+            "channel_expansion_factor": args.channel_expansion_factor,
+            "window_size": args.window_size,
+            "use_single_layer": False,
         }
+
         if args.use_riemannian_structure:
             from src.model.sthn import STHN_Interface_rgfm
 
@@ -44,11 +44,18 @@ def load_model(args):
                 "dropout": args.rgfm_dropout,
                 "bias": True,
                 "activation": None,
-                # # 🆕 NEW: 添加几何空间控制参数，默认为 True 以保持向后兼容
-                # "use_euclidean": True if args.use_euclidean==1 else False,
-                # "use_hyperbolic": True if args.use_hyperbolic==1 else False,
-                # "use_spherical": True if args.use_spherical==1 else False,
+                "use_euclidean": True if args.use_euclidean == 1 else False,
+                "use_hyperbolic": True if args.use_hyperbolic == 1 else False,
+                "use_spherical": True if args.use_spherical == 1 else False,
+                # 曲率消融参数（fixed vs learnable）
+                "learnable_curvature": True if args.learnable_curvature == 1 else False,
+                "k_h_init": args.k_h_init,
+                "k_s_init": args.k_s_init,
+                "curvature_lr_scale": args.curvature_lr_scale,
+                "curvature_clip_min": args.curvature_clip_min,
+                "curvature_clip_max": args.curvature_clip_max,
             }
+
             model = STHN_Interface_rgfm(
                 mlp_mixer_configs=mixer_configs,
                 edge_predictor_configs=edge_predictor_configs,
@@ -58,39 +65,29 @@ def load_model(args):
             model = STHN_Interface(mixer_configs, edge_predictor_configs)
 
     elif args.model == "hetero_sthn":
-        # 🆕 NEW: 异构STHN模型 - 使用我们设计的异构组件
-        # 设置异构图默认参数
-
+        # 异构STHN模型
         if args.predict_class:
             from src.model.sthn import (
                 HeteroMulticlass_Interface as HeteroSTHN_Interface,
             )
         else:
             from src.model.sthn import HeteroSTHN_Interface, HeteroSTHN_Interface_rgfm
-        from src.train_test import (
-            link_pred_train,
-        )  # 🆕 NEW: 可以复用原有的训练函数！
+        from src.train_test import link_pred_train
 
-        # 🆕 NEW: 异构边预测器配置（与原有配置兼容）
-        edge_predictor_configs.update(
-            {
-                "edge_types": args.edge_types,  # 🆕 NEW: 添加边类型
-            }
-        )
+        edge_predictor_configs.update({"edge_types": args.edge_types})
 
-        # 🆕 NEW: 异构mixer配置（与原有配置兼容）
         mixer_configs = {
-            "per_graph_size": args.max_edges,  # 50
-            "time_channels": args.time_dims,  # 100
-            "input_channels": args.edge_feat_dims,  # 14
-            "hidden_channels": args.hidden_dims,  # 100
-            "out_channels": args.hidden_dims,  # 100
-            "num_layers": args.num_layers,  # 1
-            "dropout": args.dropout,  # 0.1
-            "channel_expansion_factor": args.channel_expansion_factor,  # 2
-            "window_size": args.window_size,  # 5
-            "edge_types": args.edge_types,  # 🆕 NEW: 添加边类型
-            "use_single_layer": False,  # False
+            "per_graph_size": args.max_edges,
+            "time_channels": args.time_dims,
+            "input_channels": args.edge_feat_dims,
+            "hidden_channels": args.hidden_dims,
+            "out_channels": args.hidden_dims,
+            "num_layers": args.num_layers,
+            "dropout": args.dropout,
+            "channel_expansion_factor": args.channel_expansion_factor,
+            "window_size": args.window_size,
+            "edge_types": args.edge_types,
+            "use_single_layer": False,
         }
 
         if args.use_riemannian_structure:
@@ -102,11 +99,18 @@ def load_model(args):
                 "dropout": args.rgfm_dropout,
                 "bias": True,
                 "activation": None,
-                # # 🆕 NEW: 添加几何空间控制参数，默认为 True 以保持向后兼容
-                # "use_euclidean": True if args.use_euclidean==1 else False,
-                # "use_hyperbolic": True if args.use_hyperbolic==1 else False,
-                # "use_spherical": True if args.use_spherical==1 else False,
+                "use_euclidean": True if args.use_euclidean == 1 else False,
+                "use_hyperbolic": True if args.use_hyperbolic == 1 else False,
+                "use_spherical": True if args.use_spherical == 1 else False,
+                # 曲率消融参数（fixed vs learnable）——你当前模型分支真正使用这里
+                "learnable_curvature": True if args.learnable_curvature == 1 else False,
+                "k_h_init": args.k_h_init,
+                "k_s_init": args.k_s_init,
+                "curvature_lr_scale": args.curvature_lr_scale,
+                "curvature_clip_min": args.curvature_clip_min,
+                "curvature_clip_max": args.curvature_clip_max,
             }
+
             if args.use_ali_loss == 1:
                 from src.model.sthn import (
                     HeteroSTHN_Interface_rgfm_loss as HeteroSTHN_Interface_rgfm,
@@ -115,33 +119,24 @@ def load_model(args):
                 model = HeteroSTHN_Interface_rgfm_loss(
                     mlp_mixer_configs=mixer_configs,
                     edge_predictor_configs=edge_predictor_configs,
-                    edge_types=args.edge_types,  # 🆕 NEW: 传递边类型
-                    riemannian_configs=riemannian_configs,  # 🆕 NEW: 传递黎曼结构配置
+                    edge_types=args.edge_types,
+                    riemannian_configs=riemannian_configs,
                 )
             else:
                 model = HeteroSTHN_Interface_rgfm(
                     mlp_mixer_configs=mixer_configs,
                     edge_predictor_configs=edge_predictor_configs,
-                    edge_types=args.edge_types,  # 🆕 NEW: 传递边类型
-                    riemannian_configs=riemannian_configs,  # 🆕 NEW: 传递黎曼结构配置
+                    edge_types=args.edge_types,
+                    riemannian_configs=riemannian_configs,
                 )
         else:
-            # 🆕 NEW: 创建异构STHN模型（接口与原有模型几乎相同）
             model = HeteroSTHN_Interface(
                 mlp_mixer_configs=mixer_configs,
                 edge_predictor_configs=edge_predictor_configs,
-                edge_types=args.edge_types,  # 🆕 NEW: 传递边类型
+                edge_types=args.edge_types,
             )
-
-        # 🆕 NEW: 可以复用原有的训练函数，因为我们保持了接口兼容性！
-        # link_pred_train 函数可以不用修改
     else:
         raise NotImplementedError(f"Model {args.model} not implemented")
-
-    # for k, v in model.named_parameters():
-    #     logging.info(f"{k}: {v.requires_grad}")
-
-    # logging_model_info(model)
 
     return model, args, link_pred_train
 

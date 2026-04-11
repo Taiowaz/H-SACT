@@ -66,10 +66,7 @@ def get_inputs_for_ind(
     subgraph_data = construct_mini_batch_giant_graph(subgraph_data_raw, args.max_edges)
 
     if args.use_riemannian_structure:
-        structural_data = create_riemannian_data_snapshot(
-            subgraph_data,
-            args
-        )
+        structural_data = create_riemannian_data_snapshot(subgraph_data, args)
     else:
         structural_data = None
 
@@ -128,6 +125,86 @@ def get_inputs_for_ind(
             torch.from_numpy(subgraph_edge_type).to(args.device),
         ]
     return inputs, subgraph_node_feats, cur_inds, structural_data
+
+
+def _collect_curvature_params(model):
+    """收集模型中的曲率参数（若存在）。"""
+    curv_params, curv_param_ids = [], set()
+    for m in model.modules():
+        if hasattr(m, "curvature_parameters") and callable(m.curvature_parameters):
+            for p in m.curvature_parameters():
+                if isinstance(p, torch.nn.Parameter) and p.requires_grad:
+                    pid = id(p)
+                    if pid not in curv_param_ids:
+                        curv_param_ids.add(pid)
+                        curv_params.append(p)
+    return curv_params, curv_param_ids
+
+
+def _build_optimizer_with_curvature(model, args):
+    """
+    给曲率参数单独学习率组:
+    lr_curv = args.lr * args.curvature_lr_scale
+    """
+    curv_params, curv_param_ids = _collect_curvature_params(model)
+    base_params = [
+        p for p in model.parameters() if p.requires_grad and id(p) not in curv_param_ids
+    ]
+
+    if len(curv_params) == 0:
+        logging.info("Optimizer: single param-group (no curvature params found).")
+        return torch.optim.Adam(
+            model.parameters(), lr=args.lr, weight_decay=args.weight_decay
+        )
+
+    lr_scale = float(getattr(args, "curvature_lr_scale", 0.1))
+    curv_lr = args.lr * lr_scale
+
+    logging.info(
+        f"Optimizer: base_lr={args.lr:.6g}, curvature_lr={curv_lr:.6g}, "
+        f"base_params={len(base_params)}, curvature_params={len(curv_params)}"
+    )
+
+    return torch.optim.Adam(
+        [
+            {"params": base_params, "lr": args.lr, "weight_decay": args.weight_decay},
+            {"params": curv_params, "lr": curv_lr, "weight_decay": 0.0},
+        ]
+    )
+
+
+@torch.no_grad()
+def _clip_curvature_raw_(model, args):
+    """对 raw 曲率参数做稳定裁剪。"""
+    cmin = float(getattr(args, "curvature_clip_min", 1e-3))
+    cmax = float(getattr(args, "curvature_clip_max", 1e3))
+    cmin = max(cmin, 1e-12)
+    cmax = max(cmax, cmin + 1e-12)
+
+    # inv_softplus(x) = log(exp(x)-1)
+    min_raw = torch.log(torch.expm1(torch.tensor(cmin))).item()
+    max_raw = torch.log(torch.expm1(torch.tensor(cmax))).item()
+
+    for m in model.modules():
+        if hasattr(m, "k_h_raw") and isinstance(m.k_h_raw, torch.Tensor):
+            m.k_h_raw.data.clamp_(min_raw, max_raw)
+        if hasattr(m, "k_s_raw") and isinstance(m.k_s_raw, torch.Tensor):
+            m.k_s_raw.data.clamp_(min_raw, max_raw)
+
+
+@torch.no_grad()
+def _log_curvature_if_available(model, prefix=""):
+    for m in model.modules():
+        if hasattr(m, "get_curvature_dict") and callable(m.get_curvature_dict):
+            try:
+                c = m.get_curvature_dict()
+                logging.info(
+                    f"{prefix}curvature: k_h={c['k_h']:.6f}, "
+                    f"k_s={c['k_s']:.6f}, learnable={c['learnable_curvature']}"
+                )
+            except Exception:
+                pass
+            return
 
 
 def run(
@@ -203,6 +280,9 @@ def run(
                 loss = loss.mean()
             loss.backward()
             optimizer.step()
+
+            # 曲率稳定化（仅存在曲率参数时生效）
+            _clip_curvature_raw_(model, args)
         time_epoch += time.time() - start_time
 
         batch_auroc = MLAUROC.update(pred, edge_label.to(torch.int))
@@ -230,9 +310,7 @@ def link_pred_train(model, args, g, df, node_feats, edge_feats):
     # optimizer = torch.optim.RMSprop(
     #     model.parameters(), lr=args.lr, weight_decay=args.weight_decay
     # )
-    optimizer = torch.optim.Adam(
-        model.parameters(), lr=args.lr, weight_decay=args.weight_decay
-    )
+    optimizer = _build_optimizer_with_curvature(model, args)
     ###################################################
     # get cached data
     if args.use_cached_subgraph:
@@ -284,6 +362,11 @@ def link_pred_train(model, args, g, df, node_feats, edge_feats):
         train_AUPRC = BinaryAveragePrecision(thresholds=None)
         valid_AUPRC = BinaryAveragePrecision(thresholds=None)
 
+    # 先初始化，避免 UnboundLocalError
+    best_auc = float("-inf")
+    best_epoch = 0
+    best_state = None
+
     for epoch in range(args.num_epoch):
         logging.info(f">>> Epoch {epoch + 1}")
         train_auc, train_ap, train_loss, time_train = run(
@@ -311,6 +394,18 @@ def link_pred_train(model, args, g, df, node_feats, edge_feats):
                 valid_AUPRC,
                 mode="valid",
             )
+
+        # 避免 tensor 比较问题
+        cur_valid_auc = (
+            float(valid_auc.item()) if isinstance(valid_auc, torch.Tensor) else float(valid_auc)
+        )
+
+        if cur_valid_auc > best_auc:
+            best_auc = cur_valid_auc
+            best_epoch = epoch + 1
+            best_state = copy.deepcopy(model.state_dict())
+
+        _log_curvature_if_available(model, prefix=f"[Epoch {epoch+1}] ")
         # 【新增 2】累加耗时并更新实际运行轮数
         total_train_time += time_train
         total_valid_time += time_valid
@@ -342,14 +437,24 @@ def link_pred_train(model, args, g, df, node_feats, edge_feats):
         all_results["train_loss"].append(train_loss)
         all_results["valid_loss"].append(valid_loss)
 
+    # 兜底：即使从未提升，也保证有值可打印/可加载
+    if best_epoch == 0:
+        best_epoch = args.num_epoch
+        best_auc = cur_valid_auc
+        best_state = copy.deepcopy(model.state_dict())
+
     logging.info(f"best epoch {best_epoch}, auc score {best_auc}")
+
+    if best_state is not None:
+        model.load_state_dict(best_state)
+
     # 【新增 3】计算单轮平均耗时
     avg_train_time = total_train_time / actual_run_epochs
     avg_valid_time = total_valid_time / actual_run_epochs
     logging.info(f"best epoch {best_epoch}, auc score {best_auc}")
     logging.info(f"Avg Train Time per epoch: {avg_train_time:.4f} s")
     logging.info(f"Avg Valid(Prediction) Time per epoch: {avg_valid_time:.4f} s")
-    return best_auc_model, avg_train_time, avg_valid_time
+    return model, avg_train_time, avg_valid_time
 
 
 def compute_sign_feats(node_feats, df, start_i, num_links, root_nodes, args):
@@ -1011,24 +1116,23 @@ def get_eigen_tokens_tensor(edge_index, num_nodes, embed_dim, device):
 
     return eigvecs
 
-def create_riemannian_data_snapshot(
-    subgraph_data, args
-):
+
+def create_riemannian_data_snapshot(subgraph_data, args):
     """
     根据批次信息构建输入的Data对象。
     (最终版：增加了针对特定数据集的星型图采样逻辑)
     """
-    nodes=subgraph_data["nodes"]
-    row=subgraph_data["row"]
-    col=subgraph_data["col"]
-    root_nodes=subgraph_data["root_nodes"]
-    embed_dim=args.rgfm_embed_dim
-    device=args.device
-    dataset_name=args.dataset
+    nodes = subgraph_data["nodes"]
+    row = subgraph_data["row"]
+    col = subgraph_data["col"]
+    root_nodes = subgraph_data["root_nodes"]
+    embed_dim = args.rgfm_embed_dim
+    device = args.device
+    dataset_name = args.dataset
     # --- Part 1: (不变) 合并节点并创建新的映射与图结构 ---
     # 批次内所有节点的全局ID集合
     snapshot_global_nodes = sorted(list(set(nodes) | set(root_nodes)))
-    # 全局ID到局部索引的映射, 
+    # 全局ID到局部索引的映射,
     snapshot_global_to_local_map = {
         global_id: i for i, global_id in enumerate(snapshot_global_nodes)
     }
@@ -1138,6 +1242,5 @@ def create_riemannian_data_snapshot(
     # 图中非孤立点的局部索引,num_nodes有问题
     snapshot_data.n_id = torch.arange(snapshot_data.num_nodes, device=device)
     # 构建一个当前批次节点索引对应于全局节点ID的映射张量
-
 
     return snapshot_data.to(device)

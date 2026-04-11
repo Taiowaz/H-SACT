@@ -5,6 +5,7 @@ from typing import Optional
 import numpy as np
 from torch import Tensor
 import logging
+import inspect
 from torch_geometric.data import Data
 
 from tqdm import tqdm
@@ -1396,18 +1397,12 @@ class HeteroSTHN_Interface(nn.Module):
 
 
 class HeteroMulticlass_Interface(nn.Module):
-    """
-    异构多分类接口 - 基于原有Multiclass_Interface扩展
-    """
-
-    def __init__(
-        self, mlp_mixer_configs, edge_predictor_configs, edge_types: list = None
-    ):
+    def __init__(self, mlp_mixer_configs, edge_predictor_configs):
         super(HeteroMulticlass_Interface, self).__init__()
 
         self.time_feats_dim = edge_predictor_configs["dim_in_time"]
         self.node_feats_dim = edge_predictor_configs["dim_in_node"]
-        self.edge_types = edge_types or ["0"]  # 🆕 NEW: 支持边类型
+        self.edge_types = edge_predictor_configs["edge_types"]  # 🆕 NEW: 支持边类型
 
         # 🆕 NEW: 使用异构组件
         if self.time_feats_dim > 0:
@@ -1490,49 +1485,101 @@ class HeteroMulticlass_Interface(nn.Module):
         return pred_pos, pred_neg
 
 
+def _build_riemannian_cfg(cfg: dict = None):
+    """补全默认配置，保证向后兼容。"""
+    c = dict(cfg) if cfg is not None else {}
+    c.setdefault("learnable_curvature", False)
+    c.setdefault("k_h_init", 1.0)
+    c.setdefault("k_s_init", 1.0)
+    c.setdefault("curvature_lr_scale", 0.1)
+    c.setdefault("curvature_clip_min", 1e-3)
+    c.setdefault("curvature_clip_max", 1e3)
+    return c
+
+
+def _filter_kwargs_for_callable(fn, kwargs: dict):
+    """
+    只保留目标构造函数支持的参数，避免 unexpected keyword 报错。
+    如果目标支持 **kwargs，则原样返回。
+    """
+    sig = inspect.signature(fn)
+    params = sig.parameters
+    has_var_kw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
+    if has_var_kw:
+        return kwargs
+    return {k: v for k, v in kwargs.items() if k in params}
+
+
 from riemanngfm.modules.model import GeoGFM
 
 
 class RiemannianStructuralEncoder(nn.Module):
     def __init__(
-        self, n_layers, in_dim, hidden_dim, embed_dim, bias, activation, dropout
+        self,
+        n_layers,
+        in_dim,
+        hidden_dim,
+        embed_dim,
+        bias,
+        activation,
+        dropout,
+        # 曲率消融参数（新增，默认兼容 fixed）
+        learnable_curvature=False,
+        k_h_init=1.0,
+        k_s_init=1.0,
+        curvature_lr_scale=0.1,
+        curvature_clip_min=1e-3,
+        curvature_clip_max=1e3,
+        **extra_kwargs,
     ):
         super().__init__()
-        # 直接实例化 GeoGFM 作为我们的编码器
-        self.gfgm_model = GeoGFM(
-            n_layers, in_dim, hidden_dim, embed_dim, bias, activation, dropout
+
+        # 统一补全配置
+        cfg = _build_riemannian_cfg(
+            {
+                "n_layers": n_layers,
+                "in_dim": in_dim,
+                "hidden_dim": hidden_dim,
+                "embed_dim": embed_dim,
+                "bias": bias,
+                "activation": activation,
+                "dropout": dropout,
+                "learnable_curvature": learnable_curvature,
+                "k_h_init": k_h_init,
+                "k_s_init": k_s_init,
+                "curvature_lr_scale": curvature_lr_scale,
+                "curvature_clip_min": curvature_clip_min,
+                "curvature_clip_max": curvature_clip_max,
+                **extra_kwargs,
+            }
         )
+        self.riemannian_cfg = cfg
+
+        # 按 GeoGFM 实际签名透传参数（避免 unexpected keyword）
+        geogfm_kwargs = _filter_kwargs_for_callable(GeoGFM.__init__, cfg)
+
+        try:
+            self.gfgm_model = GeoGFM(**geogfm_kwargs)
+        except TypeError:
+            # 旧版 GeoGFM 兜底（不破坏现有训练）
+            self.gfgm_model = GeoGFM(
+                n_layers, in_dim, hidden_dim, embed_dim, bias, activation, dropout
+            )
 
     def forward(self, structural_data):
-        """
-        输入一个 PyG 的 Data 对象，其中包含了图结构快照
-        输出每个节点的结构嵌入
-        """
-        # GeoGFM 的 forward 方法返回三个空间的表示
-        # (x_E, x_H, x_S) -> (欧几里得, 双曲, 球面)
         x_E, x_H, x_S = self.gfgm_model(structural_data)
 
-        # 论文中下游任务的做法是将不同空间的表示投影到切空间后拼接
         manifold_H = self.gfgm_model.manifold_H
         manifold_S = self.gfgm_model.manifold_S
         x_h_tangent = manifold_H.logmap0(x_H)
         x_s_tangent = manifold_S.logmap0(x_S)
 
-        # 将欧几里得表示和另外两个空间的切空间表示拼接起来
-        # 注意：这里的 x_E 是从拉普拉斯特征分解得到的初始结构表示，而非节点原始特征
         structural_embedding = torch.cat([x_E, x_h_tangent, x_s_tangent], dim=-1)
-
         return structural_embedding
 
     def reset_parameters(self):
-        """
-        重置此模块及其所有子模块的参数。
-        """
-        # 遍历 gfgm_model 中的所有子模块
         for module in self.gfgm_model.modules():
-            # 检查子模块是否有名为 'reset_parameters' 的方法
             if hasattr(module, "reset_parameters"):
-                # 调用该方法来重置其权重
                 module.reset_parameters()
 
 
