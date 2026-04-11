@@ -5,13 +5,38 @@ import torch.nn as nn
 from riemanngfm.modules.layers import EuclideanEncoder, ManifoldEncoder
 from riemanngfm.modules.basics import HyperbolicStructureLearner, SphericalStructureLearner, StarStructureLearner
 from riemanngfm.manifolds import Lorentz, Sphere, ProductSpace
+import inspect
 
 
 class GeoGFM(nn.Module):
-    def __init__(self, n_layers, in_dim, hidden_dim, embed_dim, bias, activation, dropout):
+    def __init__(
+        self,
+        n_layers,
+        in_dim,
+        hidden_dim,
+        embed_dim,
+        bias,
+        activation,
+        dropout,
+        curvature_mode="learnable",
+        kappa=1.0,
+        kappa_sign_h=-1,
+        kappa_sign_s=1,
+    ):
         super(GeoGFM, self).__init__()
-        self.manifold_H = Lorentz()
-        self.manifold_S = Sphere()
+
+        self.curvature_mode = curvature_mode
+        self.kappa = float(kappa)
+        self.kappa_sign_h = int(kappa_sign_h)
+        self.kappa_sign_s = int(kappa_sign_s)
+
+        learnable = self.curvature_mode == "learnable"
+        k_abs = abs(self.kappa)
+
+        # Lorentz/Sphere 都用正的 k（曲率幅值），由流形类型决定几何符号
+        self.manifold_H = Lorentz(k=k_abs, learnable=learnable)
+        self.manifold_S = Sphere(k=k_abs, learnable=learnable)
+
         self.product = ProductSpace(*[(self.manifold_H, embed_dim),
                                       (self.manifold_S, embed_dim)])
         self.init_block = InitBlock(self.manifold_H, self.manifold_S,
@@ -24,6 +49,13 @@ class GeoGFM(nn.Module):
         self.proj = nn.Sequential(nn.Linear(2 * embed_dim, hidden_dim),
                                   nn.ReLU(),
                                   nn.Linear(hidden_dim, embed_dim))
+
+    @staticmethod
+    def _build_manifold(manifold_cls, sign, mode, kappa):
+        learnable = (mode == "learnable")
+        k_abs = abs(float(kappa))  # 关键：k只用正值
+        # sign 暂不用于 k，避免负 k 导致 NaN
+        return manifold_cls(k=k_abs, learnable=learnable)
 
     def forward(self, data):
         """
@@ -63,18 +95,27 @@ class GeoGFM(nn.Module):
 
     def cal_cl_loss(self, x1, x2):
         EPS = 1e-6
-        norm1 = x1.norm(dim=-1)
-        norm2 = x2.norm(dim=-1)
-        sim_matrix = torch.einsum('ik,jk->ij', x1, x2) / (torch.einsum('i,j->ij', norm1, norm2) + EPS)
-        sim_matrix = torch.exp(sim_matrix / 0.2)
-        pos_sim = sim_matrix.diag()
-        loss_1 = pos_sim / (sim_matrix.sum(dim=-2) + EPS)
-        loss_2 = pos_sim / (sim_matrix.sum(dim=-1) + EPS)
 
-        loss_1 = -torch.log(loss_1).mean()
-        loss_2 = -torch.log(loss_2).mean()
-        loss = (loss_1 + loss_2) / 2.
-        return loss
+        # 防 NaN/Inf 扩散
+        x1 = torch.nan_to_num(x1, nan=0.0, posinf=1e4, neginf=-1e4)
+        x2 = torch.nan_to_num(x2, nan=0.0, posinf=1e4, neginf=-1e4)
+
+        norm1 = x1.norm(dim=-1).clamp_min(EPS)
+        norm2 = x2.norm(dim=-1).clamp_min(EPS)
+
+        sim_matrix = torch.einsum('ik,jk->ij', x1, x2) / (
+            torch.einsum('i,j->ij', norm1, norm2) + EPS
+        )
+        sim_matrix = sim_matrix.clamp(-1.0, 1.0)          # cosine 范围保护
+        sim_matrix = torch.exp((sim_matrix / 0.2).clamp(-20, 20))  # 防 exp 溢出
+
+        pos_sim = sim_matrix.diag().clamp_min(EPS)
+        denom1 = sim_matrix.sum(dim=-2).clamp_min(EPS)
+        denom2 = sim_matrix.sum(dim=-1).clamp_min(EPS)
+
+        loss_1 = -(pos_sim / denom1).clamp_min(EPS).log().mean()
+        loss_2 = -(pos_sim / denom2).clamp_min(EPS).log().mean()
+        return (loss_1 + loss_2) / 2.
 
 
 class InitBlock(nn.Module):

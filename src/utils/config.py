@@ -110,6 +110,35 @@ def get_args(args=None):
     parser.add_argument(
         "--use_spherical", type=int, default=1, help="1 to enable, 0 to disable"
     )
+
+    # Curvature sensitivity experiment
+    parser.add_argument(
+        "--curvature_mode",
+        type=str,
+        default="learnable",
+        choices=["learnable", "fixed"],
+        help="Curvature mode: learnable or fixed."
+    )
+    parser.add_argument(
+        "--kappa",
+        type=float,
+        default=1.0,
+        help="Fixed curvature absolute value when curvature_mode=fixed."
+    )
+    parser.add_argument(
+        "--kappa_sign_h",
+        type=int,
+        default=-1,
+        choices=[-1, 1],
+        help="Sign for hyperbolic branch curvature."
+    )
+    parser.add_argument(
+        "--kappa_sign_s",
+        type=int,
+        default=1,
+        choices=[-1, 1],
+        help="Sign for spherical branch curvature."
+    )
     args = parser.parse_args(args)
 
     return args

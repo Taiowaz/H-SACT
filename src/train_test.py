@@ -268,6 +268,12 @@ def link_pred_train(model, args, g, df, node_feats, edge_feats):
     low_loss = 100000
     user_train_total_time = 0
     user_epoch_num = 0
+
+    # ✅ add safe initialization
+    best_auc_model = copy.deepcopy(model).cpu()
+    best_auc = float("-inf")
+    best_epoch = -1
+
     # 定义早停机制的参数
     patience = 5  # 允许验证集性能未提升的最大连续轮数
     counter = 0  # 记录验证集性能未提升的连续轮数
@@ -325,14 +331,18 @@ def link_pred_train(model, args, g, df, node_feats, edge_feats):
         total_valid_time += time_valid
         actual_run_epochs += 1
 
-        if valid_loss < low_loss:
+        # ✅ guard NaN/Inf valid_loss
+        if not np.isfinite(valid_loss):
+            logging.warning(f"Epoch {epoch + 1}: valid_loss is non-finite ({valid_loss}), skip best update.")
+            counter += 1
+        elif valid_loss < low_loss:
             best_auc_model = copy.deepcopy(model).cpu()
-            best_auc = valid_auc
-            low_loss = valid_loss
+            best_auc = float(valid_auc)
+            low_loss = float(valid_loss)
             best_epoch = epoch
-            counter = 0  # 重置早停计数器
+            counter = 0
         else:
-            counter += 1  # 验证集性能未提升，计数器加1
+            counter += 1
 
         user_train_total_time += time_train + time_valid
         user_epoch_num += 1
@@ -351,11 +361,25 @@ def link_pred_train(model, args, g, df, node_feats, edge_feats):
         all_results["train_loss"].append(train_loss)
         all_results["valid_loss"].append(valid_loss)
 
+    # ✅ fallback for never-updated case
+    if best_epoch < 0:
+        best_epoch = max(0, actual_run_epochs - 1)
+        if len(all_results["valid_auc"]) > 0:
+            best_auc = float(all_results["valid_auc"][-1])
+        else:
+            best_auc = float("nan")
+        logging.warning("Best checkpoint was never updated; fallback to last model state.")
+
     logging.info(f"best epoch {best_epoch}, auc score {best_auc}")
-    # 【新增 3】计算单轮平均耗时
-    avg_train_time = total_train_time / actual_run_epochs
-    avg_valid_time = total_valid_time / actual_run_epochs
-    logging.info(f"best epoch {best_epoch}, auc score {best_auc}")
+
+    # 防止除零
+    if actual_run_epochs > 0:
+        avg_train_time = total_train_time / actual_run_epochs
+        avg_valid_time = total_valid_time / actual_run_epochs
+    else:
+        avg_train_time = 0.0
+        avg_valid_time = 0.0
+
     logging.info(f"Avg Train Time per epoch: {avg_train_time:.4f} s")
     logging.info(f"Avg Valid(Prediction) Time per epoch: {avg_valid_time:.4f} s")
     return best_auc_model, avg_train_time, avg_valid_time

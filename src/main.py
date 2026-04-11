@@ -18,18 +18,27 @@ from src.train_test import test
 from utils.log import setup_logger
 
 
+def _curvature_tag(args):
+    if hasattr(args, "curvature_mode") and args.curvature_mode == "fixed":
+        return f"curv_fixed_k{args.kappa}_h{args.kappa_sign_h}_s{args.kappa_sign_s}"
+    return "curv_learnable"
+
 # 定义主函数
 def main(args):
     start_overall = timeit.default_timer()
 
     exp_name = args.exper_name
+    curv_tag = _curvature_tag(args)  # <-- add this line before result_filename/output_dir usage
+
     # 存放实验相关文件
     exper_dir = os.path.join(args.exper_base_dir, exp_name, args.dataset)
     checkpoint_dir = os.path.join(exper_dir, "checkpoint")
     result_dir = os.path.join(exper_dir, "result")
-    result_filename = f"{result_dir}/{args.dataset}_results.json"
-    # 存放模型测试输出结果
     output_dir = os.path.join(exper_dir, "output")
+
+    # 结果文件按曲率区分
+    result_filename = f"{result_dir}/{args.dataset}_{curv_tag}_results.json"
+    # 存放模型测试输出结果
     os.makedirs(output_dir, exist_ok=True)
     # 创建目录
     os.makedirs(exper_dir, exist_ok=True)
@@ -67,7 +76,9 @@ def main(args):
         logging.info(
             "-------------------------------------------------------------------------------"
         )
-        args.output_dir = output_dir + f"/run_{run_idx}"
+        # 每个 run 内
+        save_model_id = f"{args.dataset}_{args.seed}_{run_idx}_{curv_tag}"
+        args.output_dir = os.path.join(output_dir, f"{curv_tag}_run_{run_idx}")
         os.makedirs(args.output_dir, exist_ok=True)
 
         logging.info(f">>>>> Run: {run_idx} <<<<<")
@@ -77,7 +88,6 @@ def main(args):
         set_random_seed(run_idx + args.seed)
 
         save_model_dir = checkpoint_dir
-        save_model_id = f"{args.dataset}_{args.seed}_{run_idx}"
 
         logging.info("Train link prediction task from scratch ...")
         logging.info("加载模型...")
@@ -196,9 +206,13 @@ def main(args):
                 "data": args.dataset,
                 "run": run_idx,
                 "seed": args.seed,
-                f"test {metric}": f"{perf_mrr_test_mean: .4f} +- {perf_mrr_test_std: .4f}",
-                "test auroc": f"{auroc_test: .4f}",
-                "test auprc": f"{auprc_test: .4f}",
+                "curvature_mode": args.curvature_mode,
+                "kappa": args.kappa,
+                "kappa_sign_h": args.kappa_sign_h,
+                "kappa_sign_s": args.kappa_sign_s,
+                f"test {metric}": f"{perf_mrr_test_mean:.4f} +- {perf_mrr_test_std:.4f}",
+                "test auroc": f"{auroc_test:.4f}",
+                "test auprc": f"{auprc_test:.4f}",
                 # ----------------- 论文核心指标 -----------------
                 "Params": total_params,  # 1. 空间复杂度: 模型参数量
                 "Train_Time_per_epoch": avg_train_time,  # 2. 计算开销: 单轮平均训练时间
@@ -226,6 +240,7 @@ def main(args):
         max_mem = torch.cuda.max_memory_allocated(args.device) / (1024 * 1024)
         logging.info(f"🔥 Peak GPU Memory Usage: {max_mem:.2f} MB")
 
+    logging.info("==============================================================")
     logging.info("==============================================================")
 
 

@@ -10,9 +10,13 @@ EPS = {torch.float32: 1e-4, torch.float64: 1e-7}
 
 
 class Sphere(geoopt.Sphere):
-    def __init__(self, learnable=False):
-        super(Sphere, self).__init__()
-        self.k = torch.nn.Parameter(torch.tensor([1.0]), requires_grad=learnable)
+    def __init__(self, k=1.0, learnable=False):
+        super().__init__()  # 必须先初始化 Module
+        # Sphere 需要正曲率，取绝对值避免传入负数导致不稳定
+        self.k = torch.nn.Parameter(
+            torch.tensor([abs(float(k))], dtype=torch.float32),
+            requires_grad=learnable,
+        )
 
     def origin(
         self,

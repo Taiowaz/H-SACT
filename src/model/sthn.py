@@ -10,6 +10,7 @@ from torch_geometric.data import Data
 from tqdm import tqdm
 from sampler_core import ParallelSampler
 import torch_sparse
+from riemanngfm.modules.model import GeoGFM
 
 
 def get_emb(sin_inp):
@@ -1492,17 +1493,35 @@ class HeteroMulticlass_Interface(nn.Module):
         return pred_pos, pred_neg
 
 
-from riemanngfm.modules.model import GeoGFM
-
-
 class RiemannianStructuralEncoder(nn.Module):
     def __init__(
-        self, n_layers, in_dim, hidden_dim, embed_dim, bias, activation, dropout
+        self,
+        n_layers,
+        in_dim,
+        hidden_dim,
+        embed_dim,
+        bias,
+        activation,
+        dropout,
+        curvature_mode="learnable",
+        kappa=1.0,
+        kappa_sign_h=-1,
+        kappa_sign_s=1,
     ):
         super().__init__()
         # 直接实例化 GeoGFM 作为我们的编码器
         self.gfgm_model = GeoGFM(
-            n_layers, in_dim, hidden_dim, embed_dim, bias, activation, dropout
+            n_layers,
+            in_dim,
+            hidden_dim,
+            embed_dim,
+            bias,
+            activation,
+            dropout,
+            curvature_mode=curvature_mode,
+            kappa=kappa,
+            kappa_sign_h=kappa_sign_h,
+            kappa_sign_s=kappa_sign_s,
         )
 
     def forward(self, structural_data):
@@ -1893,8 +1912,6 @@ class HeteroSTHN_Interface_rgfm_loss(nn.Module):
                 nn.ReLU(),
                 nn.Linear(predictor_input_dim * 2, predictor_input_dim),
             )
-
-        self.reset_parameters()
 
     def reset_parameters(self):
         if self.time_feats_dim > 0:
